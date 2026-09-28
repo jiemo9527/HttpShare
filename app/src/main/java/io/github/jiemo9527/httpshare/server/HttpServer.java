@@ -47,6 +47,8 @@ import org.json.JSONObject;
  * GET  /f/0/sub/file[?dl=1]   下载，支持 Range
  * PUT  /f/0/sub/file          上传（需上传权限；覆盖另需改名/删除权限）
  * POST /api/mkdir|rm|mv?p=..[&to=新名]
+ * GET  /api/zip?p=/0/dir      文件夹打包下载（流式 ZIP）
+ * *    /dav/...               WebDAV（仅 HTTP Basic 认证，见 {@link #dav}）
  * </pre>
  *
  * 除登录外所有非 GET 请求必须带 X-HS: 1 头（跨站表单无法设置自定义头，防 CSRF）。
@@ -70,6 +72,9 @@ public final class HttpServer {
         byte[] webPage();
 
         byte[] showmePage();
+
+        /** 是否在 /dav/ 提供 WebDAV */
+        boolean webdav();
     }
 
     public static final class Share {
@@ -206,6 +211,9 @@ public final class HttpServer {
         String ip;
         long contentLength;
         InputStream body;
+        /** Transfer-Encoding: chunked；未被处理的 chunked 请求体无法跳过，只能断开连接 */
+        boolean chunked;
+        boolean consumed;
 
         String h(String k) {
             return headers.get(k.toLowerCase(Locale.ROOT));
@@ -238,6 +246,13 @@ public final class HttpServer {
                 }
                 boolean keep = handle(r, out);
                 out.flush();
+                if (r.chunked && !r.consumed) {
+                    break;
+                }
+                // 带 Expect: 100-continue 却被直接拒绝的请求，客户端可能不会发送请求体，不能再等着读
+                if (r.contentLength > 0 && "100-continue".equalsIgnoreCase(r.h("expect"))) {
+                    break;
+                }
                 // 未读完的请求体：尝试丢弃，太大则直接断开
                 if (r.contentLength > 0) {
                     if (r.contentLength > 1024 * 1024) {
@@ -305,6 +320,10 @@ public final class HttpServer {
             r.contentLength = 0;
         }
         r.body = in;
+        r.chunked = "chunked".equalsIgnoreCase(r.h("transfer-encoding"));
+        if (r.chunked) {
+            r.contentLength = 0;
+        }
         return r;
     }
 
@@ -368,13 +387,21 @@ public final class HttpServer {
         String path = r.path;
         String m = r.method;
 
+        if (path.equals("/dav") || path.startsWith("/dav/")) {
+            return dav(r, out);
+        }
+        if (m.equals("OPTIONS")) {
+            return options(out);
+        }
+
         if (path.equals("/api/info")) {
             return sendJson(out, 200, new JSONObject()
                     .put("auth", config.hasPassword())
                     .put("loggedIn", authed(r))
                     .put("upload", config.allowUpload())
                     .put("modify", config.allowModify())
-                    .put("https", ssl != null), null);
+                    .put("https", ssl != null)
+                    .put("webdav", config.webdav()), null);
         }
         if (path.equals("/api/login") && m.equals("POST")) {
             return login(r, out);
@@ -441,6 +468,8 @@ public final class HttpServer {
             }
             case "/api/ls":
                 return listDir(out, resolve(param(r, "p")));
+            case "/api/zip":
+                return zip(r, out, resolve(param(r, "p")));
             case "/api/mkdir": {
                 requireUpload();
                 Target t = resolve(param(r, "p"));
@@ -513,6 +542,11 @@ public final class HttpServer {
             }
             sessions.remove(sid);
         }
+        return basicAuth(r);
+    }
+
+    /** HTTP Basic（用户名任意），失败计入封锁 */
+    private boolean basicAuth(Req r) {
         String a = r.h("authorization");
         if (a != null && a.regionMatches(true, 0, "Basic ", 0, 6)) {
             if (locked(r.ip)) {
@@ -764,7 +798,7 @@ public final class HttpServer {
         if (t.rel.isEmpty()) {
             throw new HttpError(400, "无效文件名");
         }
-        if (r.h("content-length") == null) {
+        if (r.h("content-length") == null && !r.chunked) {
             throw new HttpError(411, "需要 Content-Length");
         }
         FileBackend.Entry st = t.fs.stat(t.abs);
@@ -774,14 +808,527 @@ public final class HttpServer {
         if (st != null && !"1".equals(r.q("overwrite"))) {
             throw new HttpError(409, "文件已存在");
         }
-        if (st != null) {
-            requireModify(); // 覆盖等同于修改已有文件
+        if (st != null && st.size > 0) {
+            requireModify(); // 覆盖等同于修改已有文件（0 字节的空文件除外）
+        }
+        long len = receive(r, out, t);
+        log(r.ip + " 上传 " + t.abs + " (" + len + " B)");
+        return ok(out);
+    }
+
+    /** 读取请求体写入 t（支持 chunked 与 Expect: 100-continue），返回字节数 */
+    private long receive(Req r, OutputStream out, Target t) throws IOException, HttpError {
+        String parent = t.abs.substring(0, Math.max(1, t.abs.lastIndexOf('/')));
+        FileBackend.Entry ps = t.fs.stat(parent);
+        if (ps == null || !ps.dir) {
+            throw new HttpError(409, "上级目录不存在");
+        }
+        if ("100-continue".equalsIgnoreCase(r.h("expect"))) {
+            out.write("HTTP/1.1 100 Continue\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
+            out.flush();
+        }
+        if (r.chunked) {
+            CountingIn in = new CountingIn(new ChunkedInputStream(r.body));
+            t.fs.write(t.abs, in, -1);
+            r.consumed = true;
+            return in.count;
         }
         long len = r.contentLength;
         r.contentLength = 0; // 由 write 负责读取
         t.fs.write(t.abs, r.body, len);
-        log(r.ip + " 上传 " + t.abs + " (" + len + " B)");
-        return ok(out);
+        return len;
+    }
+
+    private static final class CountingIn extends java.io.FilterInputStream {
+        long count;
+
+        CountingIn(InputStream in) {
+            super(in);
+        }
+
+        @Override
+        public int read() throws IOException {
+            int b = super.read();
+            if (b >= 0) {
+                count++;
+            }
+            return b;
+        }
+
+        @Override
+        public int read(byte[] b, int off, int len) throws IOException {
+            int n = super.read(b, off, len);
+            if (n > 0) {
+                count += n;
+            }
+            return n;
+        }
+    }
+
+    /** 读取小请求体（PROPFIND/PROPPATCH/LOCK 的 XML） */
+    private static byte[] readSmallBody(Req r) throws IOException, HttpError {
+        InputStream in;
+        long max = 256 * 1024;
+        if (r.chunked) {
+            in = new ChunkedInputStream(r.body);
+            r.consumed = true;
+        } else {
+            if (r.contentLength > max) {
+                throw new HttpError(413, "too large");
+            }
+            in = new java.io.FilterInputStream(r.body) {
+                long left = r.contentLength;
+
+                @Override
+                public int read(byte[] b, int off, int len) throws IOException {
+                    if (left <= 0) {
+                        return -1;
+                    }
+                    int n = super.read(b, off, (int) Math.min(len, left));
+                    if (n > 0) {
+                        left -= n;
+                    }
+                    return n;
+                }
+            };
+            r.contentLength = 0;
+        }
+        ByteArrayOutputStream bo = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf, 0, buf.length)) > 0) {
+            bo.write(buf, 0, n);
+            if (bo.size() > max) {
+                throw new HttpError(413, "too large");
+            }
+        }
+        return bo.toByteArray();
+    }
+
+    // ================================================================== 文件夹打包下载
+
+    private boolean zip(Req r, OutputStream out, Target t) throws Exception {
+        FileBackend.Entry st = t.fs.stat(t.abs);
+        if (st == null) {
+            throw new HttpError(404, "不存在");
+        }
+        if (!st.dir) {
+            throw new HttpError(400, "不是目录");
+        }
+        String base = t.rel.isEmpty() ? t.share.name : t.rel.substring(t.rel.lastIndexOf('/') + 1);
+        if (base.isEmpty() || base.equals("/")) {
+            base = "share";
+        }
+        String enc = URLEncoder.encode(base + ".zip", "UTF-8").replace("+", "%20");
+        String h = "HTTP/1.1 200 OK\r\n"
+                + "Content-Type: application/zip\r\n"
+                + "Content-Disposition: attachment; filename*=UTF-8''" + enc + "\r\n"
+                + "Cache-Control: no-store\r\n"
+                + "X-Content-Type-Options: nosniff\r\n"
+                + "Connection: close\r\n\r\n";
+        out.write(h.getBytes(StandardCharsets.UTF_8));
+        if (r.method.equals("HEAD")) {
+            return false;
+        }
+        long t0 = System.currentTimeMillis();
+        log(r.ip + " 打包下载 " + t.abs + " …");
+        Zip z = new Zip(out);
+        long[] stat = new long[3]; // 文件数、原始字节、跳过数
+        try {
+            zipWalk(t.fs, t.share.root, t.abs, base + "/", st.mtime, z, stat, 0);
+            z.finish();
+            out.flush();
+        } catch (IOException e) {
+            // 响应头已发出，无法再返回错误；直接断开，浏览器会显示下载失败
+            log(r.ip + " 打包中断 " + t.abs + "：" + e.getMessage());
+            throw new SocketException("zip aborted");
+        }
+        log(r.ip + " 打包完成 " + t.abs + "：" + stat[0] + " 个文件，" + stat[1] / 1024 / 1024 + " MB"
+                + (stat[2] > 0 ? "，跳过 " + stat[2] + " 项" : "") + "，用时 "
+                + (System.currentTimeMillis() - t0) / 1000 + " 秒");
+        return false; // 无 Content-Length，靠关闭连接结束
+    }
+
+    private void zipWalk(FileBackend fs, boolean rootShare, String dir, String prefix, long mtime, Zip z, long[] stat,
+                         int depth) throws IOException {
+        List<FileBackend.Entry> list;
+        try {
+            list = fs.list(dir);
+        } catch (IOException e) {
+            stat[2]++;
+            return;
+        }
+        z.dir(prefix, mtime);
+        if (depth > 64) {
+            return;
+        }
+        for (FileBackend.Entry e : list) {
+            String child = dir.endsWith("/") ? dir + e.name : dir + "/" + e.name;
+            // 跳过设备/管道等；普通共享不跟随任何符号链接（防止越出共享目录），ROOT 共享不进入链接目录（防止循环）
+            if (e.special || (e.link && (!rootShare || e.dir))) {
+                stat[2]++;
+                continue;
+            }
+            if (e.dir) {
+                zipWalk(fs, rootShare, child, prefix + e.name + "/", e.mtime, z, stat, depth + 1);
+                continue;
+            }
+            InputStream in;
+            try {
+                in = fs.open(child, 0);
+            } catch (IOException ex) {
+                stat[2]++;
+                continue;
+            }
+            try {
+                stat[1] += z.file(prefix + e.name, e.mtime, e.size, in);
+                stat[0]++;
+            } finally {
+                try {
+                    in.close();
+                } catch (IOException ignored) {
+                }
+            }
+        }
+    }
+
+    // ================================================================== WebDAV
+
+    private static final String DAV_ALLOW =
+            "OPTIONS, GET, HEAD, PUT, DELETE, PROPFIND, PROPPATCH, MKCOL, COPY, MOVE, LOCK, UNLOCK";
+
+    private boolean options(OutputStream out) throws IOException {
+        return send(out, 200, "text/plain; charset=utf-8", new byte[0], false, null,
+                "DAV: 1, 2\r\nMS-Author-Via: DAV\r\nAllow: " + DAV_ALLOW + "\r\n");
+    }
+
+    /**
+     * WebDAV：/dav/ 对应共享根目录，可在 Windows 资源管理器、macOS Finder、RaiDrive、
+     * 手机文件管理器等挂载为网络盘，直接打开/保存文件。
+     * 只接受 HTTP Basic（不认网页 Cookie），因此跨站页面无法借用登录态，不需要 X-HS 头。
+     * 权限与网页一致：新建/上传需「上传」，删除/移动/覆盖非空文件需「改名/删除」。
+     */
+    private boolean dav(Req r, OutputStream out) throws Exception {
+        String m = r.method;
+        if (!config.webdav()) {
+            throw new HttpError(404, "WebDAV 未开启");
+        }
+        if (m.equals("OPTIONS")) {
+            return options(out);
+        }
+        if (config.hasPassword() && !basicAuth(r)) {
+            if (locked(r.ip)) {
+                throw new HttpError(403, "密码错误次数过多，已封锁");
+            }
+            return send(out, 401, "text/plain; charset=utf-8", "需要密码".getBytes(StandardCharsets.UTF_8),
+                    m.equals("HEAD"), null, "WWW-Authenticate: Basic realm=\"HttpShare\", charset=\"UTF-8\"\r\n");
+        }
+        String rel = r.path.length() > 4 ? r.path.substring(4) : "";
+        Target t = resolve("/0" + rel);
+        switch (m) {
+            case "GET":
+            case "HEAD": {
+                FileBackend.Entry st = t.fs.stat(t.abs);
+                if (st == null) {
+                    throw new HttpError(404, "不存在");
+                }
+                if (st.dir) {
+                    byte[] b = ("<!doctype html><meta charset=utf-8><title>WebDAV</title>"
+                            + "<p>这是 HTTP 共享的 WebDAV 地址，请在文件管理器中挂载为网络位置。网页浏览请打开 <a href=\"/\">首页</a>。")
+                            .getBytes(StandardCharsets.UTF_8);
+                    return send(out, 200, "text/html; charset=utf-8", b, m.equals("HEAD"), null);
+                }
+                return download(r, out, t);
+            }
+            case "PROPFIND":
+                return propfind(r, out, t, rel);
+            case "PROPPATCH":
+                return proppatch(r, out, rel);
+            case "PUT": {
+                requireUpload();
+                if (t.rel.isEmpty()) {
+                    throw new HttpError(405, "不能写入共享根目录");
+                }
+                FileBackend.Entry st = t.fs.stat(t.abs);
+                if (st != null && st.dir) {
+                    throw new HttpError(405, "同名目录已存在");
+                }
+                if (st != null && st.size > 0) {
+                    requireModify();
+                }
+                long len = receive(r, out, t);
+                log(r.ip + " [WebDAV] 上传 " + t.abs + " (" + len + " B)");
+                return send(out, st == null ? 201 : 204, "text/plain", new byte[0], false, null);
+            }
+            case "MKCOL": {
+                requireUpload();
+                // 经 Cloudflare 隧道时空请求体会被改成 chunked 传输，读完后再判断是否真的有内容
+                if (r.contentLength > 0 || r.chunked) {
+                    if (readSmallBody(r).length > 0) {
+                        throw new HttpError(415, "MKCOL 不支持请求体");
+                    }
+                }
+                if (t.rel.isEmpty() || t.fs.stat(t.abs) != null) {
+                    throw new HttpError(405, "已存在");
+                }
+                String parent = t.abs.substring(0, Math.max(1, t.abs.lastIndexOf('/')));
+                FileBackend.Entry ps = t.fs.stat(parent);
+                if (ps == null || !ps.dir) {
+                    throw new HttpError(409, "上级目录不存在");
+                }
+                t.fs.mkdir(t.abs);
+                log(r.ip + " [WebDAV] 新建目录 " + t.abs);
+                return send(out, 201, "text/plain", new byte[0], false, null);
+            }
+            case "DELETE": {
+                requireModify();
+                if (t.rel.isEmpty()) {
+                    throw new HttpError(403, "不能删除共享根目录");
+                }
+                if (t.fs.stat(t.abs) == null) {
+                    throw new HttpError(404, "不存在");
+                }
+                t.fs.delete(t.abs);
+                log(r.ip + " [WebDAV] 删除 " + t.abs);
+                return send(out, 204, "text/plain", new byte[0], false, null);
+            }
+            case "MOVE":
+            case "COPY":
+                return moveCopy(r, out, t, m.equals("MOVE"));
+            case "LOCK":
+                return lock(r, out, t, rel);
+            case "UNLOCK":
+                return send(out, 204, "text/plain", new byte[0], false, null);
+            default:
+                return send(out, 405, "text/plain", new byte[0], false, null, "Allow: " + DAV_ALLOW + "\r\n");
+        }
+    }
+
+    private static String hrefOf(String rel, boolean dir) {
+        StringBuilder b = new StringBuilder("/dav");
+        for (String s : rel.split("/")) {
+            if (s.isEmpty()) {
+                continue;
+            }
+            try {
+                b.append('/').append(URLEncoder.encode(s, "UTF-8").replace("+", "%20"));
+            } catch (Exception e) {
+                b.append('/').append(s);
+            }
+        }
+        if (dir || b.length() == 4) {
+            b.append('/');
+        }
+        return b.toString();
+    }
+
+    private static String xml(String s) {
+        StringBuilder b = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '&': b.append("&amp;"); break;
+                case '<': b.append("&lt;"); break;
+                case '>': b.append("&gt;"); break;
+                case '"': b.append("&quot;"); break;
+                default:
+                    if (c >= 0x20 || c == '\t') {
+                        b.append(c);
+                    }
+            }
+        }
+        return b.toString();
+    }
+
+    private static final String XML_HEAD = "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n";
+
+    private static void propEntry(StringBuilder x, String href, String name, FileBackend.Entry e) {
+        x.append("<D:response><D:href>").append(xml(href)).append("</D:href><D:propstat><D:prop>");
+        x.append("<D:displayname>").append(xml(name)).append("</D:displayname>");
+        if (e.dir) {
+            x.append("<D:resourcetype><D:collection/></D:resourcetype>");
+        } else {
+            x.append("<D:resourcetype/>");
+            x.append("<D:getcontentlength>").append(e.size).append("</D:getcontentlength>");
+            x.append("<D:getcontenttype>").append(xml(Mime.of(name))).append("</D:getcontenttype>");
+        }
+        x.append("<D:getlastmodified>").append(httpDate(e.mtime)).append("</D:getlastmodified>");
+        SimpleDateFormat iso = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US);
+        iso.setTimeZone(TimeZone.getTimeZone("GMT"));
+        x.append("<D:creationdate>").append(iso.format(new Date(e.mtime))).append("</D:creationdate>");
+        x.append("<D:getetag>\"").append(Long.toHexString(e.size)).append('-').append(Long.toHexString(e.mtime))
+                .append("\"</D:getetag>");
+        x.append("<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope>"
+                + "<D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>");
+        x.append("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n");
+    }
+
+    private boolean propfind(Req r, OutputStream out, Target t, String rel) throws Exception {
+        readSmallBody(r); // 始终返回全部属性，请求体忽略
+        FileBackend.Entry st = t.fs.stat(t.abs);
+        if (st == null) {
+            throw new HttpError(404, "不存在");
+        }
+        String depth = r.h("depth");
+        StringBuilder x = new StringBuilder(XML_HEAD).append("<D:multistatus xmlns:D=\"DAV:\">\n");
+        String name = t.rel.isEmpty() ? t.share.name : t.rel.substring(t.rel.lastIndexOf('/') + 1);
+        propEntry(x, hrefOf(rel, st.dir), name, st);
+        if (st.dir && !"0".equals(depth)) {
+            String base = rel.endsWith("/") ? rel : rel + "/";
+            for (FileBackend.Entry e : t.fs.list(t.abs)) {
+                propEntry(x, hrefOf(base + e.name, e.dir), e.name, e);
+            }
+        }
+        x.append("</D:multistatus>\n");
+        return send(out, 207, "application/xml; charset=utf-8", x.toString().getBytes(StandardCharsets.UTF_8),
+                false, null);
+    }
+
+    /** 不保存自定义属性，但对请求的每个属性回 200（Windows 会设置 Win32 时间属性，失败会报错） */
+    private boolean proppatch(Req r, OutputStream out, String rel) throws Exception {
+        byte[] body = readSmallBody(r);
+        StringBuilder props = new StringBuilder();
+        try {
+            org.xmlpull.v1.XmlPullParser p = android.util.Xml.newPullParser();
+            p.setFeature(org.xmlpull.v1.XmlPullParser.FEATURE_PROCESS_NAMESPACES, true);
+            p.setInput(new java.io.ByteArrayInputStream(body), "UTF-8");
+            int propDepth = -1;
+            int n = 0;
+            for (int ev = p.getEventType(); ev != org.xmlpull.v1.XmlPullParser.END_DOCUMENT; ev = p.next()) {
+                if (ev == org.xmlpull.v1.XmlPullParser.START_TAG) {
+                    if ("DAV:".equals(p.getNamespace()) && "prop".equals(p.getName())) {
+                        propDepth = p.getDepth();
+                    } else if (propDepth > 0 && p.getDepth() == propDepth + 1) {
+                        props.append("<x").append(n).append(':').append(p.getName()).append(" xmlns:x").append(n)
+                                .append("=\"").append(xml(p.getNamespace())).append("\"/>");
+                        n++;
+                    }
+                } else if (ev == org.xmlpull.v1.XmlPullParser.END_TAG && p.getDepth() == propDepth) {
+                    propDepth = -1;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        String x = XML_HEAD + "<D:multistatus xmlns:D=\"DAV:\"><D:response><D:href>" + xml(hrefOf(rel, false))
+                + "</D:href><D:propstat><D:prop>" + props + "</D:prop><D:status>HTTP/1.1 200 OK</D:status>"
+                + "</D:propstat></D:response></D:multistatus>\n";
+        return send(out, 207, "application/xml; charset=utf-8", x.getBytes(StandardCharsets.UTF_8), false, null);
+    }
+
+    private boolean lock(Req r, OutputStream out, Target t, String rel) throws Exception {
+        readSmallBody(r);
+        if (!config.allowUpload() && !config.allowModify()) {
+            throw new HttpError(403, "只读共享");
+        }
+        FileBackend.Entry st = t.fs.stat(t.abs);
+        boolean created = false;
+        if (st == null) {
+            // 对不存在的路径加锁 = 创建空文件（RFC 4918 7.3）
+            requireUpload();
+            if (t.rel.isEmpty()) {
+                throw new HttpError(409, "无效路径");
+            }
+            t.fs.write(t.abs, new java.io.ByteArrayInputStream(new byte[0]), 0);
+            created = true;
+        }
+        byte[] rnd = new byte[16];
+        random.nextBytes(rnd);
+        StringBuilder hex = new StringBuilder();
+        for (byte b : rnd) {
+            hex.append(String.format(Locale.ROOT, "%02x", b));
+        }
+        String token = "opaquelocktoken:" + hex;
+        String x = XML_HEAD + "<D:prop xmlns:D=\"DAV:\"><D:lockdiscovery><D:activelock>"
+                + "<D:locktype><D:write/></D:locktype><D:lockscope><D:exclusive/></D:lockscope>"
+                + "<D:depth>" + ("0".equals(r.h("depth")) ? "0" : "infinity") + "</D:depth>"
+                + "<D:timeout>Second-3600</D:timeout>"
+                + "<D:locktoken><D:href>" + token + "</D:href></D:locktoken>"
+                + "<D:lockroot><D:href>" + xml(hrefOf(rel, st != null && st.dir)) + "</D:href></D:lockroot>"
+                + "</D:activelock></D:lockdiscovery></D:prop>\n";
+        return send(out, created ? 201 : 200, "application/xml; charset=utf-8", x.getBytes(StandardCharsets.UTF_8),
+                false, null, "Lock-Token: <" + token + ">\r\n");
+    }
+
+    private boolean moveCopy(Req r, OutputStream out, Target t, boolean move) throws Exception {
+        if (move) {
+            requireModify();
+        } else {
+            requireUpload();
+        }
+        if (move && t.rel.isEmpty()) {
+            throw new HttpError(403, "不能移动共享根目录");
+        }
+        String dest = r.h("destination");
+        if (dest == null) {
+            throw new HttpError(400, "缺少 Destination");
+        }
+        int s = dest.indexOf("://");
+        if (s >= 0) {
+            int p = dest.indexOf('/', s + 3);
+            dest = p < 0 ? "/" : dest.substring(p);
+        }
+        int qi = dest.indexOf('?');
+        if (qi >= 0) {
+            dest = dest.substring(0, qi);
+        }
+        dest = decPath(dest);
+        if (!dest.startsWith("/dav/")) {
+            throw new HttpError(502, "目标不在本服务器");
+        }
+        Target d = resolve("/0" + dest.substring(4));
+        if (d.rel.isEmpty()) {
+            throw new HttpError(403, "无效目标");
+        }
+        FileBackend.Entry src = t.fs.stat(t.abs);
+        if (src == null) {
+            throw new HttpError(404, "不存在");
+        }
+        if (d.abs.equals(t.abs)) {
+            throw new HttpError(403, "源与目标相同");
+        }
+        if (src.dir && (d.abs + "/").startsWith(t.abs + "/")) {
+            throw new HttpError(409, "不能移动/复制到自身子目录");
+        }
+        String parent = d.abs.substring(0, Math.max(1, d.abs.lastIndexOf('/')));
+        FileBackend.Entry ps = d.fs.stat(parent);
+        if (ps == null || !ps.dir) {
+            throw new HttpError(409, "目标上级目录不存在");
+        }
+        FileBackend.Entry existing = d.fs.stat(d.abs);
+        if (existing != null) {
+            if ("F".equalsIgnoreCase(r.h("overwrite"))) {
+                throw new HttpError(412, "目标已存在");
+            }
+            requireModify();
+            d.fs.delete(d.abs);
+        }
+        if (move) {
+            t.fs.rename(t.abs, d.abs);
+            log(r.ip + " [WebDAV] 移动 " + t.abs + " → " + d.abs);
+        } else {
+            copyRec(t.fs, t.abs, src, d.abs, 0);
+            log(r.ip + " [WebDAV] 复制 " + t.abs + " → " + d.abs);
+        }
+        return send(out, existing == null ? 201 : 204, "text/plain", new byte[0], false, null);
+    }
+
+    private void copyRec(FileBackend fs, String from, FileBackend.Entry st, String to, int depth) throws IOException {
+        if (depth > 64) {
+            throw new IOException("目录层级过深");
+        }
+        if (st.dir) {
+            fs.mkdir(to);
+            for (FileBackend.Entry e : fs.list(from)) {
+                if (e.special || e.link && e.dir) {
+                    continue;
+                }
+                copyRec(fs, from + "/" + e.name, e, to + "/" + e.name, depth + 1);
+            }
+        } else {
+            try (InputStream in = fs.open(from, 0)) {
+                fs.write(to, in, -1);
+            }
+        }
     }
 
     // ================================================================== 响应
@@ -794,7 +1341,15 @@ public final class HttpServer {
 
     private static String reason(int code) {
         switch (code) {
+            case 100: return "Continue";
             case 200: return "OK";
+            case 201: return "Created";
+            case 204: return "No Content";
+            case 207: return "Multi-Status";
+            case 412: return "Precondition Failed";
+            case 415: return "Unsupported Media Type";
+            case 423: return "Locked";
+            case 502: return "Bad Gateway";
             case 400: return "Bad Request";
             case 401: return "Unauthorized";
             case 403: return "Forbidden";
@@ -815,6 +1370,11 @@ public final class HttpServer {
 
     private boolean send(OutputStream out, int code, String type, byte[] body, boolean head,
                          String setCookie) throws IOException {
+        return send(out, code, type, body, head, setCookie, null);
+    }
+
+    private boolean send(OutputStream out, int code, String type, byte[] body, boolean head,
+                         String setCookie, String extra) throws IOException {
         StringBuilder h = new StringBuilder();
         h.append("HTTP/1.1 ").append(code).append(' ').append(reason(code)).append("\r\n");
         h.append("Content-Type: ").append(type).append("\r\n");
@@ -825,6 +1385,9 @@ public final class HttpServer {
         h.append("Referrer-Policy: no-referrer\r\n");
         if (setCookie != null) {
             h.append("Set-Cookie: ").append(setCookie).append("\r\n");
+        }
+        if (extra != null) {
+            h.append(extra);
         }
         h.append("\r\n");
         out.write(h.toString().getBytes(StandardCharsets.UTF_8));

@@ -37,36 +37,80 @@ public final class Prefs {
         sp = c.getApplicationContext().getSharedPreferences("config", Context.MODE_PRIVATE);
     }
 
-    // ---------------------------------------------------------------- 共享目录
+    // ---------------------------------------------------------------- 共享目录（只有一个）
 
+    public static final String TYPE_INTERNAL = "internal";
+    public static final String TYPE_SYSTEM = "system";
+
+    public static String sdcard() {
+        return Environment.getExternalStorageDirectory().getAbsolutePath();
+    }
+
+    /** 内部存储（普通权限，限 /sdcard 下）或系统位置（ROOT，任意路径），二选一 */
+    public String shareType() {
+        migrateShares();
+        return TYPE_SYSTEM.equals(sp.getString("share_type", TYPE_INTERNAL)) ? TYPE_SYSTEM : TYPE_INTERNAL;
+    }
+
+    /** 每种类型各记住上次选的路径，切换类型时恢复 */
+    public String sharePath(String type) {
+        migrateShares();
+        return TYPE_SYSTEM.equals(type)
+                ? sp.getString("share_system", "/")
+                : sp.getString("share_internal", sdcard());
+    }
+
+    public void setShare(String type, String path) {
+        sp.edit().putString("share_type", type)
+                .putString(TYPE_SYSTEM.equals(type) ? "share_system" : "share_internal", path).apply();
+    }
+
+    public void setShareType(String type) {
+        sp.edit().putString("share_type", type).apply();
+    }
+
+    /** 服务端仍按列表处理（序号固定为 0），只返回当前选中的一个 */
     public List<Share> shares() {
         List<Share> out = new ArrayList<>();
-        String raw = sp.getString("shares", null);
-        if (raw == null) {
-            out.add(new Share("内部存储",
-                    Environment.getExternalStorageDirectory().getAbsolutePath(), false));
-            return out;
-        }
-        try {
-            JSONArray a = new JSONArray(raw);
-            for (int i = 0; i < a.length(); i++) {
-                JSONObject o = a.getJSONObject(i);
-                out.add(new Share(o.optString("name"), o.optString("path"), o.optBoolean("root")));
-            }
-        } catch (Exception ignored) {
-        }
+        String type = shareType();
+        String path = sharePath(type);
+        out.add(new Share(displayName(type, path), path, TYPE_SYSTEM.equals(type)));
         return out;
     }
 
-    public void setShares(List<Share> list) {
-        JSONArray a = new JSONArray();
-        try {
-            for (Share s : list) {
-                a.put(new JSONObject().put("name", s.name).put("path", s.path).put("root", s.root));
-            }
-        } catch (Exception ignored) {
+    public static String displayName(String type, String path) {
+        String sd = sdcard();
+        if (!TYPE_SYSTEM.equals(type) && (path.equals(sd) || path.equals(sd + "/"))) {
+            return "内部存储";
         }
-        sp.edit().putString("shares", a.toString()).apply();
+        if (path.equals("/")) {
+            return "根目录";
+        }
+        String p = path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
+        return p.substring(p.lastIndexOf('/') + 1);
+    }
+
+    /** 0.3 及以前可配置多个共享：取第一个转换为新格式 */
+    private void migrateShares() {
+        if (sp.contains("share_type")) {
+            return;
+        }
+        SharedPreferences.Editor e = sp.edit().putString("share_type", TYPE_INTERNAL);
+        String raw = sp.getString("shares", null);
+        if (raw != null) {
+            try {
+                JSONArray a = new JSONArray(raw);
+                if (a.length() > 0) {
+                    JSONObject o = a.getJSONObject(0);
+                    boolean root = o.optBoolean("root");
+                    e.putString("share_type", root ? TYPE_SYSTEM : TYPE_INTERNAL)
+                            .putString(root ? "share_system" : "share_internal", o.optString("path"));
+                }
+            } catch (Exception ignored) {
+            }
+            e.remove("shares");
+        }
+        e.apply();
     }
 
     // ---------------------------------------------------------------- 网络
@@ -107,21 +151,72 @@ public final class Prefs {
 
     // ---------------------------------------------------------------- 访问密码
 
+    private static final String PW_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    private static final String KS_ALIAS = "httpshare_pw";
+
+    /** 9–12 位随机密码，大小写字母与数字各至少一个（去掉 0/O、1/l/I 等易混字符） */
+    public static String randomPassword() {
+        SecureRandom r = new SecureRandom();
+        int len = 9 + r.nextInt(4);
+        while (true) {
+            StringBuilder b = new StringBuilder(len);
+            for (int i = 0; i < len; i++) {
+                b.append(PW_CHARS.charAt(r.nextInt(PW_CHARS.length())));
+            }
+            String s = b.toString();
+            if (s.matches(".*[A-Z].*") && s.matches(".*[a-z].*") && s.matches(".*[0-9].*")) {
+                return s;
+            }
+        }
+    }
+
     public boolean hasPassword() {
         return sp.getString("pw_hash", null) != null;
     }
 
-    /** 传 null 或空串表示取消密码。仅保存加盐 SHA-256，不保存明文。 */
+    /**
+     * 传 null 或空串表示取消密码。校验用加盐哈希；为了能在 App 内查看/复制，
+     * 另存一份用 Android Keystore（AES-GCM，密钥不可导出）加密的密文。
+     */
     public void setPassword(String pw) {
+        cachedPw = null;
         if (pw == null || pw.isEmpty()) {
-            sp.edit().remove("pw_hash").remove("pw_salt").apply();
+            sp.edit().remove("pw_hash").remove("pw_salt").remove("pw_enc").apply();
             return;
         }
         byte[] salt = new byte[16];
         new SecureRandom().nextBytes(salt);
         String s = Base64.encodeToString(salt, Base64.NO_WRAP);
-        sp.edit().putString("pw_salt", s).putString("pw_hash", hash(s, pw)).apply();
+        SharedPreferences.Editor e = sp.edit().putString("pw_salt", s).putString("pw_hash", hash(s, pw));
+        String enc = encrypt(pw);
+        if (enc != null) {
+            e.putString("pw_enc", enc);
+        } else {
+            e.remove("pw_enc");
+        }
+        e.apply();
     }
+
+    private static volatile String lastEnc;
+    private static volatile String lastPlain;
+
+    /** 已设置的明文密码；旧版本设置的（只有哈希）或解密失败返回 null */
+    public String password() {
+        String enc = sp.getString("pw_enc", null);
+        if (!hasPassword() || enc == null) {
+            return null;
+        }
+        if (enc.equals(lastEnc)) {
+            return lastPlain;
+        }
+        String plain = decrypt(enc);
+        lastPlain = plain;
+        lastEnc = enc;
+        return plain;
+    }
+
+    private volatile String cachedPw;
+    private volatile String cachedHash;
 
     public boolean checkPassword(String pw) {
         String h = sp.getString("pw_hash", null);
@@ -131,9 +226,20 @@ public final class Prefs {
         if (pw == null) {
             return false;
         }
-        return MessageDigest.isEqual(
+        // WebDAV 客户端每个请求都带 Basic 认证，缓存最近一次校验成功的结果，避免每次 2 万轮哈希
+        String cp = cachedPw;
+        if (cp != null && h.equals(cachedHash) && MessageDigest.isEqual(
+                cp.getBytes(StandardCharsets.UTF_8), pw.getBytes(StandardCharsets.UTF_8))) {
+            return true;
+        }
+        boolean ok = MessageDigest.isEqual(
                 h.getBytes(StandardCharsets.US_ASCII),
                 hash(sp.getString("pw_salt", ""), pw).getBytes(StandardCharsets.US_ASCII));
+        if (ok) {
+            cachedHash = h;
+            cachedPw = pw;
+        }
+        return ok;
     }
 
     private static String hash(String salt, String pw) {
@@ -146,6 +252,48 @@ public final class Prefs {
             return Base64.encodeToString(d, Base64.NO_WRAP);
         } catch (Exception e) {
             throw new IllegalStateException(e);
+        }
+    }
+
+    private static javax.crypto.SecretKey key() throws Exception {
+        java.security.KeyStore ks = java.security.KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        if (ks.containsAlias(KS_ALIAS)) {
+            return ((java.security.KeyStore.SecretKeyEntry) ks.getEntry(KS_ALIAS, null)).getSecretKey();
+        }
+        javax.crypto.KeyGenerator kg = javax.crypto.KeyGenerator.getInstance(
+                android.security.keystore.KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        kg.init(new android.security.keystore.KeyGenParameterSpec.Builder(KS_ALIAS,
+                android.security.keystore.KeyProperties.PURPOSE_ENCRYPT
+                        | android.security.keystore.KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(android.security.keystore.KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(android.security.keystore.KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .build());
+        return kg.generateKey();
+    }
+
+    private static String encrypt(String pw) {
+        try {
+            javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(javax.crypto.Cipher.ENCRYPT_MODE, key());
+            byte[] ct = c.doFinal(pw.getBytes(StandardCharsets.UTF_8));
+            return Base64.encodeToString(c.getIV(), Base64.NO_WRAP) + ":" + Base64.encodeToString(ct, Base64.NO_WRAP);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static String decrypt(String enc) {
+        try {
+            int i = enc.indexOf(':');
+            byte[] iv = Base64.decode(enc.substring(0, i), Base64.NO_WRAP);
+            byte[] ct = Base64.decode(enc.substring(i + 1), Base64.NO_WRAP);
+            javax.crypto.Cipher c = javax.crypto.Cipher.getInstance("AES/GCM/NoPadding");
+            c.init(javax.crypto.Cipher.DECRYPT_MODE, key(), new javax.crypto.spec.GCMParameterSpec(128, iv));
+            return new String(c.doFinal(ct), StandardCharsets.UTF_8);
+        } catch (Exception e) {
+            return null;
         }
     }
 
@@ -169,5 +317,16 @@ public final class Prefs {
 
     public void setShowmeSync(boolean b) {
         sp.edit().putBoolean("showme", b).apply();
+    }
+
+    // ---------------------------------------------------------------- WebDAV
+
+    /** 在 /dav/ 提供 WebDAV（可挂载为网络盘），权限与网页端相同 */
+    public boolean webdav() {
+        return sp.getBoolean("webdav", true);
+    }
+
+    public void setWebdav(boolean b) {
+        sp.edit().putBoolean("webdav", b).apply();
     }
 }

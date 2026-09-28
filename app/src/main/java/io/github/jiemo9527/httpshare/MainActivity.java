@@ -58,7 +58,7 @@ public class MainActivity extends Activity {
     private final TextView[] modeChips = new TextView[3];
 
     // 浏览页（同步查阅）
-    private int browseShare = -1;
+    private int browseShare = 0;
     private String browseRel = "";
     private int browseToken;
     private ScrollView browseScroll;
@@ -78,11 +78,17 @@ public class MainActivity extends Activity {
     private TextView stateView;
     private TextView toggleBtn;
     private LinearLayout urlBox;
-    private LinearLayout shareList;
+    private final TextView[] typeChips = new TextView[2];
+    private TextView sharePathView;
+    private TextView shareHint;
     private TextView permView;
     private TextView logView;
     private Switch hideIconSwitch;
     private TextView passwordState;
+    private TextView passwordValue;
+    private TextView pwEye;
+    private View passwordShowRow;
+    private boolean pwVisible;
 
     // ================================================================== 生命周期
 
@@ -125,7 +131,7 @@ public class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (currentTab == TAB_BROWSE && browseShare >= 0) {
+        if (currentTab == TAB_BROWSE && !browseRel.isEmpty()) {
             browseUp();
             return;
         }
@@ -268,196 +274,114 @@ public class MainActivity extends Activity {
         permView.setOnClickListener(v -> requestStorage());
         page.addView(permView);
 
-        LinearLayout head = horizontal();
-        head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setPadding(0, dp(14), 0, dp(6));
+        LinearLayout sc = card();
         TextView h = text("共享目录", 16);
         h.setTypeface(Typeface.DEFAULT_BOLD);
-        head.addView(h, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView add = button("＋ 添加", ACCENT, false);
-        add.setOnClickListener(v -> editShare(-1));
-        head.addView(add);
-        page.addView(head);
-
-        shareList = vertical();
-        page.addView(shareList);
-
-        TextView hint = text("开启 ROOT 的目录通过 su 访问，可共享 /data、/system 等系统目录；"
-                + "未开启的只能访问本应用有权限的目录（内部存储需“所有文件访问”权限）。修改共享目录无需重启服务。", 12);
-        hint.setAlpha(0.7f);
-        hint.setPadding(dp(4), dp(10), dp(4), 0);
-        page.addView(hint);
+        sc.addView(h);
+        LinearLayout types = horizontal();
+        types.setPadding(0, dp(8), 0, 0);
+        String[] tn = {"内部存储", "系统位置（ROOT）"};
+        for (int i = 0; i < 2; i++) {
+            final String type = i == 0 ? Prefs.TYPE_INTERNAL : Prefs.TYPE_SYSTEM;
+            TextView c = text(tn[i], 14);
+            c.setGravity(Gravity.CENTER);
+            c.setPadding(dp(4), dp(8), dp(4), dp(8));
+            c.setOnClickListener(v -> setShareType(type));
+            typeChips[i] = c;
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1);
+            if (i > 0) {
+                lp.setMarginStart(dp(6));
+            }
+            types.addView(c, lp);
+        }
+        sc.addView(types);
+        LinearLayout pr = horizontal();
+        pr.setGravity(Gravity.CENTER_VERTICAL);
+        pr.setPadding(0, dp(10), 0, 0);
+        sharePathView = text("", 14);
+        sharePathView.setTypeface(Typeface.MONOSPACE);
+        sharePathView.setTextColor(ACCENT);
+        pr.addView(sharePathView, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView change = button("选择目录…", ACCENT, false);
+        change.setOnClickListener(v -> {
+            String type = prefs.shareType();
+            boolean sys = Prefs.TYPE_SYSTEM.equals(type);
+            pickDir(prefs.sharePath(type), sys, sys ? "/" : Prefs.sdcard(), chosen -> {
+                prefs.setShare(type, chosen);
+                browseRel = "";
+                refreshShares();
+                if (currentTab == TAB_BROWSE) {
+                    loadBrowse();
+                }
+            });
+        });
+        pr.addView(change);
+        sc.addView(pr);
+        shareHint = text("", 12);
+        shareHint.setAlpha(0.65f);
+        shareHint.setPadding(0, dp(6), 0, 0);
+        sc.addView(shareHint);
+        page.addView(sc, cardLp());
         return page(page);
     }
 
     private void refreshShares() {
-        shareList.removeAllViews();
-        List<Prefs.Share> list = prefs.shares();
-        if (list.isEmpty()) {
-            TextView e = text("还没有共享目录，点右上角添加", 13);
-            e.setAlpha(0.6f);
-            e.setPadding(dp(4), dp(12), 0, dp(12));
-            shareList.addView(e);
+        if (sharePathView == null) {
+            return;
         }
-        for (int i = 0; i < list.size(); i++) {
-            final int idx = i;
-            Prefs.Share s = list.get(i);
-            LinearLayout row = card();
-            LinearLayout top = horizontal();
-            top.setGravity(Gravity.CENTER_VERTICAL);
-            TextView n = text(s.name, 15);
-            n.setTypeface(Typeface.DEFAULT_BOLD);
-            top.addView(n, new LinearLayout.LayoutParams(0, -2, 1));
-            if (s.root) {
-                TextView tag = text("ROOT", 11);
-                tag.setTextColor(RED);
-                tag.setPadding(dp(6), dp(1), dp(6), dp(1));
-                tag.setBackground(outline(RED));
-                top.addView(tag);
+        String type = prefs.shareType();
+        boolean sys = Prefs.TYPE_SYSTEM.equals(type);
+        sharePathView.setText(prefs.sharePath(type));
+        shareHint.setText(sys
+                ? "通过 su 访问，可共享 /data、/system 等任意位置。网页端可改动系统文件，请务必设置访问密码。"
+                : "只能选择内部存储（" + Prefs.sdcard() + "）下的目录，需要“所有文件访问”权限。");
+        for (int i = 0; i < 2; i++) {
+            TextView c = typeChips[i];
+            boolean on = (i == 1) == sys;
+            GradientDrawable g = new GradientDrawable();
+            g.setCornerRadius(dp(8));
+            if (on) {
+                g.setColor(i == 1 ? RED : ACCENT);
+                c.setTextColor(Color.WHITE);
+                c.setTypeface(Typeface.DEFAULT_BOLD);
+            } else {
+                g.setStroke(dp(1), 0x88888888);
+                c.setTextColor(fg());
+                c.setTypeface(Typeface.DEFAULT);
             }
-            row.addView(top);
-            TextView p = text(s.path, 12);
-            p.setAlpha(0.7f);
-            p.setTextIsSelectable(false);
-            row.addView(p);
-            row.setOnClickListener(v -> editShare(idx));
-            shareList.addView(row, cardLp());
+            c.setBackground(g);
         }
     }
 
-    private void editShare(int idx) {
-        List<Prefs.Share> list = prefs.shares();
-        Prefs.Share s = idx >= 0 ? list.get(idx) : new Prefs.Share("", "", false);
-
-        LinearLayout box = vertical();
-        box.setPadding(dp(20), dp(8), dp(20), 0);
-        EditText name = edit("名称（网页上显示）", s.name);
-        EditText path = edit("绝对路径，如 /sdcard/DCIM 或 /data", s.path);
-        Switch root = new Switch(this);
-        root.setText("使用 ROOT 访问");
-        root.setChecked(s.root);
-        root.setPadding(0, dp(8), 0, dp(8));
-
-        HorizontalScrollView hs = new HorizontalScrollView(this);
-        hs.setHorizontalScrollBarEnabled(false);
-        LinearLayout presets = horizontal();
-        String sd = Environment.getExternalStorageDirectory().getAbsolutePath();
-        String[][] ps = {
-                {"内部存储", sd, "0"}, {"DCIM", sd + "/DCIM", "0"}, {"Download", sd + "/Download", "0"},
-                {"/ 根目录", "/", "1"}, {"/data", "/data", "1"}, {"/system", "/system", "1"},
-                {"应用数据", "/data/data", "1"}, {"/vendor", "/vendor", "1"},
-        };
-        for (String[] p : ps) {
-            TextView chip = text(p[0], 13);
-            chip.setPadding(dp(10), dp(5), dp(10), dp(5));
-            chip.setBackground(outline(0x88888888));
-            chip.setOnClickListener(v -> {
-                path.setText(p[1]);
-                root.setChecked(p[2].equals("1"));
-                if (name.getText().length() == 0) {
-                    name.setText(p[0]);
-                }
-            });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
-            lp.setMarginEnd(dp(6));
-            presets.addView(chip, lp);
+    /** 内部存储 / 系统位置 二选一；即时生效（服务运行中也无需重启） */
+    private void setShareType(String type) {
+        if (type.equals(prefs.shareType())) {
+            return;
         }
-        hs.addView(presets);
-        box.addView(hs);
-        box.addView(name);
-        LinearLayout pathRow = horizontal();
-        pathRow.setGravity(Gravity.CENTER_VERTICAL);
-        pathRow.addView(path, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView pick = button("浏览…", ACCENT, false);
-        pick.setOnClickListener(v -> pickDir(path.getText().toString().trim(), root.isChecked(), chosen -> {
-            path.setText(chosen);
-            if (name.getText().length() == 0) {
-                name.setText(chosen.equals("/") ? "根目录" : chosen.substring(chosen.lastIndexOf('/') + 1));
-            }
-        }));
-        pathRow.addView(pick);
-        box.addView(pathRow);
-        box.addView(root);
-
-        AlertDialog.Builder b = new AlertDialog.Builder(this)
-                .setTitle(idx >= 0 ? "编辑共享" : "添加共享")
-                .setView(box)
-                .setPositiveButton("保存", null)
-                .setNegativeButton("取消", null);
-        if (idx >= 0) {
-            b.setNeutralButton("删除", (d, w) -> {
-                List<Prefs.Share> l = prefs.shares();
-                l.remove(idx);
-                prefs.setShares(l);
-                refreshShares();
-            });
-        }
-        AlertDialog dlg = b.create();
-        dlg.setOnShowListener(d -> dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-            String p = path.getText().toString().trim();
-            String n = name.getText().toString().trim();
-            if (!p.startsWith("/")) {
-                toast("请填写以 / 开头的绝对路径");
-                return;
-            }
-            if (p.length() > 1 && p.endsWith("/")) {
-                p = p.substring(0, p.length() - 1);
-            }
-            if (n.isEmpty()) {
-                n = p.equals("/") ? "根目录" : p.substring(p.lastIndexOf('/') + 1);
-            }
-            final String fp = p;
-            final String fn = n;
-            final boolean fr = root.isChecked();
-            v.setEnabled(false);
+        if (Prefs.TYPE_SYSTEM.equals(type)) {
             new Thread(() -> {
-                String err = validate(fp, fr);
+                boolean ok = RootBackend.available();
                 runOnUiThread(() -> {
-                    v.setEnabled(true);
-                    if (err != null) {
-                        toast(err);
+                    if (!ok) {
+                        toast("未获得 root 授权（请在 KernelSU/Magisk 中允许本应用）");
                         return;
                     }
-                    List<Prefs.Share> l = prefs.shares();
-                    Prefs.Share ns = new Prefs.Share(fn, fp, fr);
-                    if (idx >= 0) {
-                        l.set(idx, ns);
-                    } else {
-                        l.add(ns);
-                    }
-                    prefs.setShares(l);
-                    refreshShares();
-                    dlg.dismiss();
+                    applyShareType(type);
                 });
             }).start();
-        }));
-        dlg.show();
+            return;
+        }
+        applyShareType(type);
     }
 
-    /** 后台线程调用：root 目录用 su 检查，普通目录检查可读 */
-    private String validate(String path, boolean root) {
-        if (root) {
-            if (!RootBackend.available()) {
-                return "未获得 root 授权（请在 KernelSU/Magisk 中允许本应用）";
-            }
-            try {
-                io.github.jiemo9527.httpshare.server.FileBackend.Entry e = new RootBackend().stat(path);
-                if (e == null || !e.dir) {
-                    return "目录不存在：" + path;
-                }
-            } catch (Exception e) {
-                return e.getMessage();
-            }
-            return null;
+    private void applyShareType(String type) {
+        prefs.setShareType(type);
+        browseRel = "";
+        refreshShares();
+        if (currentTab == TAB_BROWSE) {
+            loadBrowse();
         }
-        File f = new File(path);
-        if (!f.isDirectory()) {
-            return "目录不存在或无权限（系统目录请开启 ROOT）";
-        }
-        if (f.list() == null) {
-            return "无法读取该目录：请授予“所有文件访问”或开启 ROOT";
-        }
-        return null;
+        toast(Prefs.TYPE_SYSTEM.equals(type) ? "已切换为系统位置（ROOT）" : "已切换为内部存储");
     }
 
     private void setMode(int m) {
@@ -512,10 +436,6 @@ public class MainActivity extends Activity {
         if (ShareService.running) {
             stopService(i);
         } else {
-            if (prefs.shares().isEmpty()) {
-                toast("请先添加共享目录");
-                return;
-            }
             ShareService.error = null;
             startForegroundService(i);
             stateView.setText("启动中…");
@@ -600,15 +520,11 @@ public class MainActivity extends Activity {
     }
 
     private void browseUp() {
-        if (browseShare < 0) {
+        if (browseRel.isEmpty()) {
             return;
         }
-        if (browseRel.isEmpty()) {
-            browseShare = -1;
-        } else {
-            int i = browseRel.lastIndexOf('/');
-            browseRel = i < 0 ? "" : browseRel.substring(0, i);
-        }
+        int i = browseRel.lastIndexOf('/');
+        browseRel = i < 0 ? "" : browseRel.substring(0, i);
         loadBrowse();
     }
 
@@ -618,31 +534,8 @@ public class MainActivity extends Activity {
         }
         refreshSyncInfo();
         final List<Prefs.Share> shares = prefs.shares();
-        if (browseShare >= shares.size()) {
-            browseShare = -1;
-            browseRel = "";
-        }
+        browseShare = 0;
         browseList.removeAllViews();
-        if (browseShare < 0) {
-            browsePath.setText("全部共享");
-            publishShowme(null, null);
-            if (shares.isEmpty()) {
-                TextView e = text("还没有共享目录，先在「共享」页添加", 13);
-                e.setAlpha(0.6f);
-                e.setPadding(dp(4), dp(16), 0, 0);
-                browseList.addView(e);
-            }
-            for (int i = 0; i < shares.size(); i++) {
-                final int idx = i;
-                Prefs.Share s = shares.get(i);
-                browseList.addView(entryRow("🗂️", s.name, s.path + (s.root ? "  · ROOT" : ""), v -> {
-                    browseShare = idx;
-                    browseRel = "";
-                    loadBrowse();
-                }));
-            }
-            return;
-        }
         final Prefs.Share sh = shares.get(browseShare);
         final String abs = joinPath(sh.path, browseRel);
         final String title = sh.name + (browseRel.isEmpty() ? "" : "/" + browseRel);
@@ -782,10 +675,11 @@ public class MainActivity extends Activity {
         void onPicked(String path);
     }
 
-    /** 简易文件管理器：逐级进入目录，选中当前目录。root=true 时通过 su 列目录，可进入 /data 等 */
-    private void pickDir(String start, boolean root, PathCallback cb) {
-        final String[] cur = {start != null && start.startsWith("/")
-                ? start : Environment.getExternalStorageDirectory().getAbsolutePath()};
+    /** 简易文件管理器：逐级进入目录，选中当前目录。root=true 时通过 su 列目录，可进入 /data 等；不能退到 floor 之上 */
+    private void pickDir(String start, boolean root, String floor, PathCallback cb) {
+        final String fl = floor.length() > 1 && floor.endsWith("/") ? floor.substring(0, floor.length() - 1) : floor;
+        final String[] cur = {start != null && (start.equals(fl) || fl.equals("/") && start.startsWith("/")
+                || start.startsWith(fl + "/")) ? start : fl};
         LinearLayout box = vertical();
         box.setPadding(dp(16), dp(4), dp(16), 0);
         TextView pathView = text("", 13);
@@ -808,7 +702,7 @@ public class MainActivity extends Activity {
         ScrollView sv = new ScrollView(this);
         sv.addView(list);
         box.addView(sv, new LinearLayout.LayoutParams(-1, (int) (getResources().getDisplayMetrics().heightPixels * 0.45f)));
-        TextView mode = text(root ? "ROOT 模式：可进入系统目录" : "普通模式：只能进入本应用有权限的目录", 11);
+        TextView mode = text(root ? "系统位置（ROOT）：可进入任意目录" : "内部存储：只能选择 " + fl + " 下的目录", 11);
         mode.setAlpha(0.6f);
         mode.setPadding(0, dp(6), 0, 0);
         box.addView(mode);
@@ -888,7 +782,8 @@ public class MainActivity extends Activity {
         }
         dlg.setOnShowListener(d -> dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
             String c = cur[0];
-            if (c.equals("/")) {
+            if (c.equals("/") || c.equals(fl)) {
+                toast("已是最上层");
                 return;
             }
             int i = c.lastIndexOf('/');
@@ -980,6 +875,21 @@ public class MainActivity extends Activity {
         page.addView(smSw);
         hint(page, "网页打开 http(s)://地址/showme ，会实时显示你在 App「浏览」页打开的目录（需登录，只读）。离开浏览页后网页显示等待状态。");
 
+        section(page, "WebDAV（挂载为网络盘）");
+        Switch davSw = sw("开启 WebDAV（地址 /dav/）", prefs.webdav());
+        davSw.setOnCheckedChangeListener((b, c) -> {
+            prefs.setWebdav(c);
+            refresh();
+        });
+        page.addView(davSw);
+        hint(page, "在电脑/手机文件管理器里把手机挂成网络盘，直接打开、编辑、保存文件，改动实时写回手机。"
+                + "用户名任意，密码为访问密码；读写权限与网页端相同。即时生效。\n"
+                + "· Windows：资源管理器 → 此电脑 → 映射网络驱动器 → 填 WebDAV 地址。系统自带客户端只允许 HTTPS，"
+                + "局域网 HTTP 需先在注册表 HKLM\\SYSTEM\\CurrentControlSet\\Services\\WebClient\\Parameters 把 "
+                + "BasicAuthLevel 改为 2 并重启 WebClient 服务；或使用 RaiDrive 等第三方工具。走 Cloudflare 隧道（HTTPS）可直接映射。\n"
+                + "· macOS：Finder → 前往 → 连接服务器。\n"
+                + "· 安卓/iOS：支持 WebDAV 的文件管理器（如 MT 管理器、Solid Explorer、Documents）。");
+
         section(page, "加密");
         LinearLayout pwRow = horizontal();
         pwRow.setGravity(Gravity.CENTER_VERTICAL);
@@ -989,9 +899,32 @@ public class MainActivity extends Activity {
         pwBtn.setOnClickListener(v -> editPassword());
         pwRow.addView(pwBtn);
         page.addView(pwRow);
-        hint(page, "访问网页或文件前需输入密码；只保存加盐哈希。同一 IP 连续输错 3 次封锁 2 小时，"
+        LinearLayout pwShow = horizontal();
+        pwShow.setGravity(Gravity.CENTER_VERTICAL);
+        pwShow.setPadding(0, dp(2), 0, dp(4));
+        passwordValue = text("", 16);
+        passwordValue.setTypeface(Typeface.MONOSPACE);
+        passwordValue.setOnClickListener(v -> togglePwVisible());
+        pwShow.addView(passwordValue, new LinearLayout.LayoutParams(0, -2, 1));
+        pwEye = button("显示", ACCENT, false);
+        pwEye.setOnClickListener(v -> togglePwVisible());
+        pwShow.addView(pwEye);
+        TextView pwCopy = button("复制", ACCENT, false);
+        pwCopy.setOnClickListener(v -> {
+            String pw = prefs.password();
+            if (pw != null) {
+                copySecret("访问密码", pw);
+            }
+        });
+        LinearLayout.LayoutParams cl = new LinearLayout.LayoutParams(-2, -2);
+        cl.setMarginStart(dp(6));
+        pwShow.addView(pwCopy, cl);
+        passwordShowRow = pwShow;
+        page.addView(pwShow);
+        hint(page, "访问网页或文件前需输入密码。可随机生成 9–12 位（大小写字母 + 数字）。校验用加盐哈希；"
+                + "明文用系统 Keystore 加密保存，仅本机 App 内可查看/复制。同一 IP 连续输错 3 次封锁 2 小时，"
                 + "重启服务即可解除全部封锁（外网访问按真实访客 IP 计）。"
-                + "curl/wget 可用 HTTP Basic：curl -u x:密码 URL。即时生效。");
+                + "curl/wget/WebDAV 用 HTTP Basic：用户名任意，密码为访问密码。即时生效。");
 
         Switch https = sw("HTTPS 加密传输（自签名证书）", prefs.https());
         https.setOnCheckedChangeListener((b, c) -> {
@@ -1053,24 +986,104 @@ public class MainActivity extends Activity {
         return page(page);
     }
 
+    private void refreshPassword() {
+        if (passwordState == null) {
+            return;
+        }
+        boolean has = prefs.hasPassword();
+        String pw = has ? prefs.password() : null;
+        passwordState.setText(has ? "访问密码：已设置" : "访问密码：未设置");
+        passwordShowRow.setVisibility(pw != null ? View.VISIBLE : View.GONE);
+        if (has && pw == null) {
+            passwordState.setText("访问密码：已设置（旧版本设置，无法查看，重新设置后可查看）");
+        }
+        if (pw != null) {
+            passwordValue.setText(pwVisible ? pw : "••••••••••");
+            passwordValue.setTextColor(pwVisible ? ACCENT : fg());
+            pwEye.setText(pwVisible ? "隐藏" : "显示");
+        }
+    }
+
+    private void togglePwVisible() {
+        pwVisible = !pwVisible;
+        refreshPassword();
+    }
+
+    /** 复制敏感内容：Android 13+ 标记为敏感，剪贴板预览不显示明文 */
+    private void copySecret(String label, String value) {
+        ClipData cd = ClipData.newPlainText(label, value);
+        if (Build.VERSION.SDK_INT >= 33) {
+            android.os.PersistableBundle extras = new android.os.PersistableBundle();
+            extras.putBoolean("android.content.extra.IS_SENSITIVE", true);
+            cd.getDescription().setExtras(extras);
+        }
+        getSystemService(ClipboardManager.class).setPrimaryClip(cd);
+        toast("已复制" + label);
+    }
+
     private void editPassword() {
-        EditText e = edit(prefs.hasPassword() ? "新密码（留空=取消密码）" : "访问密码", "");
-        e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
-        new AlertDialog.Builder(this).setTitle("访问密码").setView(wrapDialog(e))
-                .setPositiveButton("保存", (d, w) -> {
-                    String pw = e.getText().toString();
-                    if (!pw.isEmpty() && pw.length() < 4) {
-                        toast("密码至少 4 位");
-                        return;
-                    }
-                    new Thread(() -> {
-                        prefs.setPassword(pw);
-                        runOnUiThread(() -> {
-                            toast(pw.isEmpty() ? "已取消密码" : "密码已设置");
-                            refresh();
-                        });
-                    }).start();
-                }).setNegativeButton("取消", null).show();
+        LinearLayout box = vertical();
+        box.setPadding(dp(20), dp(8), dp(20), 0);
+        EditText e = edit("访问密码（至少 4 位）", "");
+        e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD);
+        e.setTypeface(Typeface.MONOSPACE);
+        box.addView(e);
+        LinearLayout row = horizontal();
+        row.setPadding(0, dp(8), 0, 0);
+        TextView gen = button("🎲 随机生成", ACCENT, false);
+        gen.setOnClickListener(v -> {
+            e.setText(Prefs.randomPassword());
+            e.setSelection(e.getText().length());
+        });
+        row.addView(gen);
+        box.addView(row);
+        TextView tip = text("随机密码为 9–12 位大小写字母与数字（已去掉 0/O、1/l/I 等易混字符）。保存后可在此处查看、复制。", 12);
+        tip.setAlpha(0.65f);
+        tip.setPadding(0, dp(8), 0, 0);
+        box.addView(tip);
+        if (!prefs.hasPassword()) {
+            e.setText(Prefs.randomPassword());
+        }
+        AlertDialog.Builder b = new AlertDialog.Builder(this).setTitle("访问密码").setView(box)
+                .setPositiveButton("保存", null)
+                .setNegativeButton("取消", null);
+        if (prefs.hasPassword()) {
+            b.setNeutralButton("取消密码", (d, w) -> {
+                if (prefs.remoteMode() != Remote.MODE_OFF) {
+                    toast("外网访问需要密码：请先在「共享」页切换为仅局域网");
+                    return;
+                }
+                new Thread(() -> {
+                    prefs.setPassword(null);
+                    runOnUiThread(() -> {
+                        toast("已取消密码");
+                        refresh();
+                    });
+                }).start();
+            });
+        }
+        AlertDialog dlg = b.create();
+        dlg.setOnShowListener(d -> dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String pw = e.getText().toString();
+            if (pw.length() < 4) {
+                toast("密码至少 4 位");
+                return;
+            }
+            if (pw.length() > 64 || !pw.equals(pw.trim())) {
+                toast("密码最长 64 位，且首尾不能是空格");
+                return;
+            }
+            dlg.dismiss();
+            new Thread(() -> {
+                prefs.setPassword(pw);
+                runOnUiThread(() -> {
+                    pwVisible = true;
+                    refresh();
+                    copySecret("访问密码", pw);
+                });
+            }).start();
+        }));
+        dlg.show();
     }
 
     private void restartHint() {
@@ -1112,6 +1125,7 @@ public class MainActivity extends Activity {
                 urlBox.addView(u);
             }
             TextView tip = text("点击地址复制；同一局域网的电脑/手机浏览器打开即可。"
+                    + (prefs.webdav() ? "WebDAV：地址后加 /dav/" : "")
                     + (prefs.hasPassword() ? "" : "\n⚠ 未设置访问密码，同网段任何人都能访问。"), 12);
             tip.setAlpha(0.75f);
             urlBox.addView(tip);
@@ -1149,9 +1163,7 @@ public class MainActivity extends Activity {
 
         refreshShares();
         refreshModeChips();
-        if (passwordState != null) {
-            passwordState.setText(prefs.hasPassword() ? "访问密码：已设置" : "访问密码：未设置");
-        }
+        refreshPassword();
         if (hideIconSwitch != null) {
             hideIconSwitch.setChecked(isIconHidden());
         }

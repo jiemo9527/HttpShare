@@ -28,7 +28,8 @@ public final class LocalBackend implements FileBackend {
         List<Entry> out = new ArrayList<>(files.length);
         for (File f : files) {
             boolean d = f.isDirectory();
-            out.add(new Entry(f.getName(), d, d ? 0 : f.length(), f.lastModified()));
+            boolean link = java.nio.file.Files.isSymbolicLink(f.toPath());
+            out.add(new Entry(f.getName(), d, d ? 0 : f.length(), f.lastModified(), link, !d && !f.isFile()));
         }
         return out;
     }

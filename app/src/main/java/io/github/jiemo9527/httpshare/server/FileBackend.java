@@ -14,11 +14,22 @@ public interface FileBackend {
         /** 毫秒 */
         public final long mtime;
 
+        /** 符号链接（打包下载时不进入链接目录，避免循环） */
+        public final boolean link;
+        /** 设备、管道、套接字等非普通文件（打包下载时跳过） */
+        public final boolean special;
+
         public Entry(String name, boolean dir, long size, long mtime) {
+            this(name, dir, size, mtime, false, false);
+        }
+
+        public Entry(String name, boolean dir, long size, long mtime, boolean link, boolean special) {
             this.name = name;
             this.dir = dir;
             this.size = size;
             this.mtime = mtime;
+            this.link = link;
+            this.special = special;
         }
     }
 

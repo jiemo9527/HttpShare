@@ -170,6 +170,11 @@ public class ShareService extends Service {
                     public byte[] showmePage() {
                         return showmePage;
                     }
+
+                    @Override
+                    public boolean webdav() {
+                        return prefs.webdav();
+                    }
                 };
                 HttpServer s = new HttpServer(cfg, prefs.port(), ssl, ShareService::log);
                 s.start();

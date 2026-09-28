@@ -47,6 +47,33 @@ class StaticTest(unittest.TestCase):
         self.assertIn("/api/showme?v=", page)
         self.assertNotIn('"Content-Type: text/event-stream', read(JAVA / "server/ShowMe.java") + read(JAVA / "server/HttpServer.java"))
 
+    def test_single_share_and_password(self):
+        prefs = read(JAVA / "Prefs.java")
+        self.assertIn("TYPE_INTERNAL", prefs)
+        self.assertIn("TYPE_SYSTEM", prefs)
+        self.assertIn("migrateShares()", prefs)
+        # 9-12 chars, upper/lower/digit, plaintext only via Android Keystore
+        self.assertIn("9 + r.nextInt(4)", prefs)
+        self.assertIn("AndroidKeyStore", prefs)
+        self.assertIn("AES/GCM/NoPadding", prefs)
+        main = read(JAVA / "MainActivity.java")
+        self.assertNotIn("editShare", main)
+        self.assertIn("IS_SENSITIVE", main)
+
+    def test_zip_and_webdav(self):
+        srv = read(JAVA / "server/HttpServer.java")
+        self.assertIn('case "/api/zip":', srv)
+        self.assertIn("e.special || (e.link && (!rootShare || e.dir))", srv)
+        # WebDAV must only accept Basic auth (never the web cookie) -> no CSRF via cookies
+        dav = srv[srv.index("private boolean dav(Req r"):srv.index("private static String hrefOf")]
+        self.assertIn("basicAuth(r)", dav)
+        self.assertNotIn("authed(r)", dav)
+        self.assertIn("requireModify()", dav)
+        self.assertIn("requireUpload()", dav)
+        self.assertIn("SIG_END64", read(JAVA / "server/Zip.java"))
+        web = read(MAIN / "assets/web.html")
+        self.assertIn("/api/zip?p=", web)
+
     def test_xposed_entry(self):
         self.assertEqual(read(MAIN / "assets/xposed_init").strip(),
                          "io.github.jiemo9527.httpshare.XposedInit")

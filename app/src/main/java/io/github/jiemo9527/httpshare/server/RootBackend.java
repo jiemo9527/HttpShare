@@ -72,6 +72,7 @@ public final class RootBackend implements FileBackend {
         if (p.length < 4) {
             return null;
         }
+        boolean link = p[0].startsWith("@");
         String name = p[3];
         int slash = name.lastIndexOf('/');
         if (slash >= 0 && slash < name.length() - 1) {
@@ -85,7 +86,8 @@ public final class RootBackend implements FileBackend {
             mt = Long.parseLong(p[2]) * 1000L;
         } catch (NumberFormatException ignored) {
         }
-        return new Entry(name, dir, dir ? 0 : size, mt);
+        boolean special = !dir && !p[0].contains("regular");
+        return new Entry(name, dir, dir ? 0 : size, mt, link, special);
     }
 
     @Override
@@ -104,7 +106,7 @@ public final class RootBackend implements FileBackend {
         // 先确认是可访问目录，再列出；失效符号链接 stat -L 会失败，改用不跟随的 stat 兜底
         String cmd = "cd " + q(dir) + " || exit 1; for f in * .*; do "
                 + "case \"$f\" in .|..) continue;; esac; "
-                + "[ -e \"$f\" ] || [ -L \"$f\" ] || continue; "
+                + "[ -e \"$f\" ] || [ -L \"$f\" ] || continue; [ -L \"$f\" ] && printf @; "
                 + "stat -L -c " + FMT + " -- \"$f\" 2>/dev/null || stat -c " + FMT + " -- \"$f\"; done";
         String out = run(cmd);
         List<Entry> list = new ArrayList<>();
