@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">HTTP 共享</string>
+    <string name="xposed_desc">通过 HTTP 在局域网分享手机存储目录，可用 root 共享系统目录，支持访问密码。作用域「系统框架」用于隐藏桌面图标后不生成替身图标。</string>
+</resources>

@@ -1,0 +1,14 @@
+# Local SDK and Gradle state
+local.properties
+.gradle/
+**/build/
+.idea/
+*.iml
+
+# Signing keys and local outputs
+*.keystore
+*.jks
+*.apk
+*.aab
+__pycache__/
+*.pyc
