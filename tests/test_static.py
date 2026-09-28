@@ -87,7 +87,7 @@ class StaticTest(unittest.TestCase):
         bat = raw.decode("utf-8")
         for ph in ("{URL}", "{NEED_BASIC}", "{UNC}", "{PERSIST}", "{NOTE}"):
             self.assertIn(ph, bat)
-        self.assertIn("-AsSecureString", bat)        # password typed at runtime, never embedded
+        self.assertIn("Read-Host", bat)              # password typed at runtime, never embedded
         self.assertIn("TrustFailure", bat)           # self-signed HTTPS explained, not a wrong password
         self.assertIn("-Verb RunAs", bat)
         # repeated wrong password from auto-retrying clients counts once

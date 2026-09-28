@@ -111,9 +111,7 @@ for ($try = 1; $try -le 3; $try++) {
     if ($env:HTTPSHARE_PW) {
         $pw = $env:HTTPSHARE_PW
     } else {
-        $sec = Read-Host ' 请输入访问密码（App「设置」里可查看/复制，输入时不显示）' -AsSecureString
-        $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
-        try { $pw = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) } finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+        $pw = (Read-Host ' 请输入访问密码（App「设置」里可查看/复制，可直接粘贴）').Trim()
     }
     if (-not $pw) { Fail '未输入密码，已取消。' }
     $r = Probe ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('HttpShare:' + $pw)))
@@ -142,5 +140,6 @@ Write-Host
 Say "已挂载为 $drv 盘，正在打开……" 'Green'
 OpenDrive $drv
 if ($Note) { Say $Note }
+Say '注意：在手机上修改过的文件，这里约 1 分钟后才会显示新内容（Windows 自带 WebDAV 客户端的缓存，无法关闭）。' 'Yellow'
 Say '断开：在“此电脑”里右键该盘符，选择“断开连接”。'
 exit 0

@@ -772,6 +772,40 @@ public final class HttpServer {
                 .put("share", t.share.name).put("root", t.share.root).put("entries", a), null);
     }
 
+    static String etag(FileBackend.Entry e) {
+        return "\"" + Long.toHexString(e.size) + "-" + Long.toHexString(e.mtime) + "\"";
+    }
+
+    /** If-None-Match 优先；否则按 If-Modified-Since（秒级）判断 */
+    private static boolean notModified(Req r, FileBackend.Entry st, String etag) {
+        if (r.h("range") != null) {
+            return false;
+        }
+        String inm = r.h("if-none-match");
+        if (inm != null) {
+            for (String t : inm.split(",")) {
+                String v = t.trim();
+                if (v.startsWith("W/")) {
+                    v = v.substring(2);
+                }
+                if (v.equals(etag) || v.equals("*")) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        String ims = r.h("if-modified-since");
+        if (ims != null) {
+            try {
+                SimpleDateFormat f = new SimpleDateFormat("EEE, dd MMM yyyy HH:mm:ss 'GMT'", Locale.US);
+                f.setTimeZone(TimeZone.getTimeZone("GMT"));
+                return st.mtime / 1000 <= f.parse(ims).getTime() / 1000;
+            } catch (Exception ignored) {
+            }
+        }
+        return false;
+    }
+
     private boolean download(Req r, OutputStream out, Target t) throws Exception {
         FileBackend.Entry st = t.fs.stat(t.abs);
         if (st == null) {
@@ -779,6 +813,14 @@ public final class HttpServer {
         }
         if (st.dir) {
             throw new HttpError(400, "是目录");
+        }
+        // 文件可能随时在手机上被修改：要求客户端每次都向服务器确认（Windows WebDAV 否则会用本地缓存约 1 分钟）
+        String etag = etag(st);
+        if (notModified(r, st, etag)) {
+            String h304 = "HTTP/1.1 304 Not Modified\r\nETag: " + etag + "\r\nCache-Control: no-cache\r\n"
+                    + "Last-Modified: " + httpDate(st.mtime) + "\r\n\r\n";
+            out.write(h304.getBytes(StandardCharsets.UTF_8));
+            return true;
         }
         long size = st.size;
         long start = 0;
@@ -819,6 +861,8 @@ public final class HttpServer {
         h.append("Content-Length: ").append(len).append("\r\n");
         h.append("Accept-Ranges: bytes\r\n");
         h.append("Last-Modified: ").append(httpDate(st.mtime)).append("\r\n");
+        h.append("ETag: ").append(etag).append("\r\n");
+        h.append("Cache-Control: no-cache\r\n");
         h.append("X-Content-Type-Options: nosniff\r\n");
         // 预览 HTML/SVG 时禁止执行脚本，避免被共享文件反打本站会话
         h.append("Content-Security-Policy: sandbox\r\n");
@@ -1262,8 +1306,7 @@ public final class HttpServer {
         SimpleDateFormat iso = new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss'Z'", Locale.US);
         iso.setTimeZone(TimeZone.getTimeZone("GMT"));
         x.append("<D:creationdate>").append(iso.format(new Date(e.mtime))).append("</D:creationdate>");
-        x.append("<D:getetag>\"").append(Long.toHexString(e.size)).append('-').append(Long.toHexString(e.mtime))
-                .append("\"</D:getetag>");
+        x.append("<D:getetag>").append(xml(etag(e))).append("</D:getetag>");
         x.append("<D:supportedlock><D:lockentry><D:lockscope><D:exclusive/></D:lockscope>"
                 + "<D:locktype><D:write/></D:locktype></D:lockentry></D:supportedlock>");
         x.append("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>\n");
