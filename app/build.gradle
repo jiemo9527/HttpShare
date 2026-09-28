@@ -10,8 +10,15 @@ android {
         applicationId 'io.github.jiemo9527.httpshare'
         minSdk 29
         targetSdk 35
-        versionCode 1
-        versionName '0.1.0'
+        versionCode 2
+        versionName '0.2.0'
+    }
+
+    packagingOptions {
+        jniLibs {
+            // cloudflared 必须解压到 nativeLibraryDir 才能执行
+            useLegacyPackaging true
+        }
     }
 
     buildTypes {

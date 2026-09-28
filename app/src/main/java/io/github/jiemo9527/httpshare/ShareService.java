@@ -46,6 +46,7 @@ public class ShareService extends Service {
     public static volatile Runnable onChange;
 
     private HttpServer server;
+    private Remote remote;
     private PowerManager.WakeLock wake;
     private WifiManager.WifiLock wifi;
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -168,6 +169,7 @@ public class ShareService extends Service {
                     String url = scheme + "://" + (ips.isEmpty() ? "127.0.0.1" : ips.get(0)) + ":" + port;
                     startForegroundCompat(url);
                     log("服务已启动 " + url + (prefs.hasPassword() ? "（已设密码）" : "（无密码）"));
+                    startRemote(prefs);
                 });
             } catch (Exception e) {
                 main.post(() -> {
@@ -178,6 +180,42 @@ public class ShareService extends Service {
             }
         }, "HttpShare-start").start();
         return START_NOT_STICKY;
+    }
+
+    public static java.io.File tunnelBinary(android.content.Context c) {
+        return new java.io.File(c.getApplicationInfo().nativeLibraryDir, "libcloudflared.so");
+    }
+
+    private void startRemote(Prefs prefs) {
+        int mode = prefs.remoteMode();
+        if (mode == Remote.MODE_OFF) {
+            return;
+        }
+        if (!prefs.hasPassword()) {
+            log("未设置访问密码，已拒绝开启外网访问");
+            Remote.state = "未设置访问密码，外网访问未开启";
+            notifyChange();
+            return;
+        }
+        remote = new Remote(tunnelBinary(this), getFilesDir(), prefs.port(), prefs.https(), mode,
+                new Remote.Listener() {
+                    @Override
+                    public void onState() {
+                        notifyChange();
+                        main.post(() -> {
+                            if (server != null) {
+                                String u = Remote.url;
+                                startForegroundCompat(u != null ? u : Remote.state);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onLog(String line) {
+                        log(line);
+                    }
+                });
+        remote.start();
     }
 
     private void acquireLocks() {
@@ -230,6 +268,12 @@ public class ShareService extends Service {
 
     @Override
     public void onDestroy() {
+        if (remote != null) {
+            remote.stop();
+            remote = null;
+        }
+        Remote.state = "";
+        Remote.url = null;
         if (server != null) {
             server.stop();
             server = null;

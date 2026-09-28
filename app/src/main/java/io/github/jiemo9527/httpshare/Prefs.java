@@ -139,6 +139,17 @@ public final class Prefs {
         }
     }
 
+    // ---------------------------------------------------------------- 外网
+
+    /** Remote.MODE_OFF / MODE_AUTO(公网 IPv4 优先，否则 Cloudflare) / MODE_TUNNEL(总是 Cloudflare) */
+    public int remoteMode() {
+        return sp.getInt("remote", 0);
+    }
+
+    public void setRemoteMode(int m) {
+        sp.edit().putInt("remote", m).apply();
+    }
+
     // ---------------------------------------------------------------- 图标
 
     /** 模块生效时自动隐藏桌面图标（默认开） */

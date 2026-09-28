@@ -10,6 +10,12 @@
   - 访问密码：只保存加盐 SHA-256 哈希。网页会话使用 HttpOnly + SameSite=Strict Cookie；同一 IP 连续输错 8 次锁定 5 分钟。curl/wget 可以用 HTTP Basic，例如 `curl -u x:密码 URL`。
   - HTTPS：首次使用时生成 RSA-2048 自签名证书（有效期 10 年），可在应用内查看 SHA-256 指纹，用来核对浏览器显示的证书。
   - 其他防护：写操作要求请求带自定义请求头（防 CSRF）；下载的文件以 `CSP: sandbox` 返回，防止共享目录里的 HTML/SVG 劫持会话；路径拒绝 `..`，普通共享不能通过符号链接越出共享目录。
+- **外网访问（v0.2）**：设置 → 外网访问
+  - 自动：网卡上有公网 IPv4 且与出口 IP 一致时直连，否则自动开 Cloudflare 临时隧道（`xxx.trycloudflare.com`，每次启动变化）。
+  - 总是隧道：不检测公网 IP。
+  - 隧道无需公网 IP，蜂窝流量下可用；外网访问强制要求先设置访问密码，登录失败锁定按真实客户端 IP（`CF-Connecting-IP`）计。
+  - 实现：内置 Termux 构建的 Android 版 cloudflared（arm64，`lib/arm64-v8a/libcloudflared.so`）。Go 程序在 Android 上无法使用系统 DNS、蜂窝下直连会报 network unreachable，所以 DNS（系统 DNS 失败时回落阿里/腾讯 DoH）、申请隧道、到 Cloudflare 边缘的 TCP 都由 App 的 Java 层完成，cloudflared 只连本地中继。
+  - 已知：若手机装了 box_for_root/mihomo 等透明代理且 Cloudflare 域名被规则拦截，隧道会失败，需把本应用加入代理绕过名单。
 - **自动隐藏图标**：LSPosed 模块生效后，打开应用即自动隐藏桌面图标（设置里可以关闭或恢复）。隐藏后可从 LSPosed 管理器 → 模块 → HTTP 共享 → 设置，或通知栏进入。
 - **关于**：设置页底部的链接跳转到本项目 GitHub。
 
@@ -23,6 +29,8 @@
 作用域说明：勾选本应用，界面才能判断模块是否生效并自动隐藏图标。勾选系统框架后，会拦截 Android 10+ 为「隐藏了图标且声明了权限」的应用生成的「应用详情」替身图标。不启用模块时，共享功能照常可用。
 
 ## 本地构建
+
+APK 仅含 arm64-v8a 的 cloudflared（约 29 MB，压缩后 APK 约 11 MB）；其他架构外网只能用公网 IPv4 直连。
 
 需要 JDK 17、Android SDK（platform 35、build-tools 35.0.0）和 Gradle 8.7。在工程根目录的 `local.properties` 中填写 `sdk.dir`，然后运行：
 

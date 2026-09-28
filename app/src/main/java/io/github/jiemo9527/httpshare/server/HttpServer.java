@@ -263,6 +263,11 @@ public final class HttpServer {
             }
         }
         String cl = r.h("content-length");
+        // 经 Cloudflare 隧道进来的连接都来自 127.0.0.1，取真实客户端 IP（仅信任本机回环来源）
+        String cf = r.h("cf-connecting-ip");
+        if (cf != null && ("127.0.0.1".equals(ip) || "::1".equals(ip)) && cf.length() < 64) {
+            r.ip = cf;
+        }
         try {
             r.contentLength = cl == null ? 0 : Long.parseLong(cl);
         } catch (NumberFormatException e) {

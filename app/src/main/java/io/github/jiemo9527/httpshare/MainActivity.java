@@ -492,6 +492,36 @@ public class MainActivity extends Activity {
         page.addView(showFp, wrapLp());
         page.addView(fp);
 
+        section(page, "外网访问");
+        String[] modes = {"关闭（仅局域网）", "自动：有公网 IPv4 直连，否则 Cloudflare 隧道", "总是使用 Cloudflare 隧道"};
+        LinearLayout modeBox = vertical();
+        android.widget.RadioGroup rg = new android.widget.RadioGroup(this);
+        for (int i = 0; i < modes.length; i++) {
+            android.widget.RadioButton rb = new android.widget.RadioButton(this);
+            rb.setId(1000 + i);
+            rb.setText(modes[i]);
+            rb.setTextColor(fg());
+            rb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+            rb.setPadding(0, dp(4), 0, dp(4));
+            rg.addView(rb);
+        }
+        rg.check(1000 + prefs.remoteMode());
+        rg.setOnCheckedChangeListener((g, id) -> {
+            int m = id - 1000;
+            if (m != 0 && !prefs.hasPassword()) {
+                toast("开启外网访问前请先设置访问密码");
+            }
+            if (m != 0 && !Remote.binaryAvailable(ShareService.tunnelBinary(this))) {
+                toast("本机架构不支持隧道，只能公网 IPv4 直连");
+            }
+            prefs.setRemoteMode(m);
+            restartHint();
+        });
+        modeBox.addView(rg);
+        page.addView(modeBox);
+        hint(page, "Cloudflare 临时隧道：手机主动连出，无需公网 IP，流量/移动网络也能用；地址形如 xxx.trycloudflare.com，每次启动会变，"
+                + "单文件上传上限约 100 MB，速度取决于到 Cloudflare 的线路。为防止被扫描，外网访问强制要求设置访问密码。修改后需重启服务。");
+
         section(page, "桌面图标");
         Switch auto = sw("模块生效时自动隐藏桌面图标", prefs.autoHideIcon());
         auto.setOnCheckedChangeListener((b, c) -> {
@@ -605,6 +635,27 @@ public class MainActivity extends Activity {
                     + (prefs.hasPassword() ? "" : "\n⚠ 未设置访问密码，同网段任何人都能访问。"), 12);
             tip.setAlpha(0.75f);
             urlBox.addView(tip);
+            if (prefs.remoteMode() != Remote.MODE_OFF) {
+                TextView rh = text("外网", 13);
+                rh.setTypeface(Typeface.DEFAULT_BOLD);
+                rh.setPadding(0, dp(12), 0, 0);
+                urlBox.addView(rh);
+                String ru = Remote.url;
+                if (ru != null) {
+                    TextView u = text(ru, 15);
+                    u.setTypeface(Typeface.MONOSPACE);
+                    u.setTextColor(ACCENT);
+                    u.setPadding(0, dp(4), 0, dp(2));
+                    u.setOnClickListener(v -> {
+                        getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("url", ru));
+                        toast("已复制 " + ru);
+                    });
+                    urlBox.addView(u);
+                }
+                TextView rs = text(Remote.state == null || Remote.state.isEmpty() ? "准备中…" : Remote.state, 12);
+                rs.setAlpha(0.75f);
+                urlBox.addView(rs);
+            }
         } else {
             stateView.setText(ShareService.error != null ? ShareService.error : "○ 已停止");
             stateView.setTextColor(ShareService.error != null ? RED : fg());
