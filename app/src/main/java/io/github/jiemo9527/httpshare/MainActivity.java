@@ -884,9 +884,7 @@ public class MainActivity extends Activity {
         page.addView(davSw);
         hint(page, "在电脑/手机文件管理器里把手机挂成网络盘，直接打开、编辑、保存文件，改动实时写回手机。"
                 + "用户名任意，密码为访问密码；读写权限与网页端相同。即时生效。\n"
-                + "· Windows：资源管理器 → 此电脑 → 映射网络驱动器 → 填 WebDAV 地址。系统自带客户端只允许 HTTPS，"
-                + "局域网 HTTP 需先在注册表 HKLM\\SYSTEM\\CurrentControlSet\\Services\\WebClient\\Parameters 把 "
-                + "BasicAuthLevel 改为 2 并重启 WebClient 服务；或使用 RaiDrive 等第三方工具。走 Cloudflare 隧道（HTTPS）可直接映射。\n"
+                + "· Windows：网页上点「挂载为网络盘」→ 下载一键挂载脚本，双击运行、输入密码即可（首次会弹一次管理员确认，自动修改 WebDAV 设置）。\n"
                 + "· macOS：Finder → 前往 → 连接服务器。\n"
                 + "· 安卓/iOS：支持 WebDAV 的文件管理器（如 MT 管理器、Solid Explorer、Documents）。");
 

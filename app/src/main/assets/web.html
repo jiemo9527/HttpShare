@@ -57,6 +57,12 @@ input{font:inherit;padding:7px 10px;border-radius:8px;border:1px solid var(--lin
 #prog{position:fixed;left:0;right:0;bottom:0;background:var(--card);border-top:1px solid var(--line);padding:8px 14px;display:none;z-index:10}
 #prog .b{height:4px;background:var(--line);border-radius:2px;margin-top:4px}
 #prog .b i{display:block;height:100%;background:var(--acc);border-radius:2px;width:0}
+#davdlg{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:center;justify-content:center;z-index:35;padding:16px}
+#davdlg .box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;max-width:520px;width:100%}
+#davdlg h3{margin:0 0 10px}#davdlg ol{padding-left:20px;margin:8px 0;color:var(--mut)}#davdlg ol li{margin:4px 0}
+#davdlg code{display:block;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;margin:8px 0;overflow-wrap:anywhere;font-size:13px}
+#davdlg .acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;margin-top:12px}
+#davdlg a.pri{background:var(--acc);border-color:var(--acc);color:#fff}
 #viewer{position:fixed;inset:0;background:rgba(0,0,0,.88);display:none;align-items:center;justify-content:center;z-index:40;flex-direction:column}
 #viewer img,#viewer video{max-width:96vw;max-height:86vh}
 #viewer .vt{color:#fff;margin-top:8px;max-width:90vw;overflow-wrap:anywhere}
@@ -81,7 +87,7 @@ input{font:inherit;padding:7px 10px;border-radius:8px;border:1px solid var(--lin
   <div class="tools">
     <input type="search" id="filter" placeholder="筛选当前目录…">
     <button id="zipcur" title="把当前目录打包为 ZIP 下载">打包下载此目录</button>
-    <button id="davbtn" class="hidden" title="挂载为网络盘">WebDAV</button>
+    <button id="davbtn" class="hidden" title="挂载为电脑的网络盘">挂载为网络盘</button>
     <span id="wtools" class="hidden" style="display:flex;gap:8px">
       <button id="upbtn" class="pri">上传</button>
       <button id="mkbtn">新建文件夹</button>
@@ -94,6 +100,17 @@ input{font:inherit;padding:7px 10px;border-radius:8px;border:1px solid var(--lin
 <div id="drop">松开以上传到当前目录</div>
 <div id="prog"><div id="ptxt"></div><div class="b"><i id="pbar"></i></div></div>
 <div id="toast"></div>
+<div id="davdlg"><div class="box">
+  <h3>挂载为网络盘（WebDAV）</h3>
+  <div id="davwin">
+    <div>Windows：下载脚本后双击运行，按提示输入访问密码，自动映射为盘符并打开。</div>
+    <ol><li>首次运行如需修改系统设置（允许 HTTP 登录、单文件上限 4 GB），会弹出一次管理员确认</li>
+    <li>密码只在运行时输入，不写入脚本</li><li id="davtun" class="hidden">隧道地址每次启动服务都会变，变了之后重新下载运行即可</li></ol>
+  </div>
+  <div class="mut">其他系统 / 工具手动添加，用户名任意，密码为访问密码：</div>
+  <code id="davurl"></code>
+  <div class="acts"><button id="davcopy">复制地址</button><a class="btn pri" id="davbat" href="/api/mount.bat" download="HttpShare-WebDAV.bat">下载 Windows 一键挂载脚本</a><button id="davclose">关闭</button></div>
+</div></div>
 <div id="viewer"><div id="vbox"></div><div class="vt" id="vt"></div></div>
 <script>
 const $=id=>document.getElementById(id);
@@ -141,7 +158,12 @@ $('filter').oninput=render;
 // 流式 ZIP：服务端边读边压缩，下载立即开始；大小未知，浏览器不显示总进度
 function zipDl(p){toast('开始打包下载，大目录请耐心等待');const a=document.createElement('a');a.href='/api/zip?p='+encodeURIComponent(p);a.download='';document.body.appendChild(a);a.click();a.remove()}
 $('zipcur').onclick=()=>zipDl(cur);
-$('davbtn').onclick=()=>{const u=location.origin+'/dav/';(navigator.clipboard?navigator.clipboard.writeText(u):Promise.reject()).then(()=>toast('已复制 WebDAV 地址：'+u+'（用户名任意，密码为访问密码）'),()=>prompt('WebDAV 地址（用户名任意，密码为访问密码）',u))};
+$('davbtn').onclick=()=>{$('davurl').textContent=location.origin+'/dav/';$('davtun').classList.toggle('hidden',!/\.trycloudflare\.com$/i.test(location.hostname));
+ $('davwin').style.fontWeight=/Windows/i.test(navigator.userAgent)?'600':'';$('davdlg').style.display='flex'};
+$('davclose').onclick=()=>$('davdlg').style.display='none';
+$('davdlg').onclick=e=>{if(e.target.id==='davdlg')e.target.style.display='none'};
+$('davbat').onclick=()=>setTimeout(()=>toast('下载后双击运行 HttpShare-WebDAV.bat'),300);
+$('davcopy').onclick=()=>{const u=$('davurl').textContent;(navigator.clipboard?navigator.clipboard.writeText(u):Promise.reject()).then(()=>toast('已复制 '+u),()=>prompt('WebDAV 地址',u))};
 $('list').onclick=async ev=>{const k=ev.target.dataset.k;if(k)return sortBy(k);
  const a=ev.target.closest('a[data-f]');if(a&&preview(a))return ev.preventDefault();
  const b=ev.target.closest('button');if(!b)return;const n=b.closest('.row').dataset.n;const p=cur+'/'+n;
@@ -154,7 +176,7 @@ function preview(a){const n=a.textContent,x=(n.split('.').pop()||'').toLowerCase
  else if(/^(mp3|m4a|flac|wav|ogg|aac|opus)$/.test(x)){el=document.createElement('audio');el.controls=true;el.autoplay=true}else return false;
  el.src=src;const box=$('vbox');box.innerHTML='';box.appendChild(el);$('vt').textContent=n+'（点击空白处关闭）';$('viewer').style.display='flex';return true}
 $('viewer').onclick=e=>{if(e.target.tagName==='VIDEO'||e.target.tagName==='AUDIO')return;$('viewer').style.display='none';$('vbox').innerHTML=''};
-document.onkeydown=e=>{if(e.key==='Escape')$('viewer').click()};
+document.onkeydown=e=>{if(e.key==='Escape'){$('viewer').click();$('davdlg').style.display='none'}};
 $('upbtn').onclick=()=>$('file').click();$('file').onchange=e=>{upload([...e.target.files]);e.target.value=''};
 $('mkbtn').onclick=async()=>{const n=prompt('文件夹名称');if(!n)return;try{await api('/api/mkdir?p='+encodeURIComponent(cur+'/'+n),{method:'POST'});loadDir()}catch(e){toast(e.message)}};
 function put(url,file,onp){return new Promise((ok,no)=>{const x=new XMLHttpRequest();x.open('PUT',url);x.setRequestHeader('X-HS','1');x.upload.onprogress=e=>onp(e.loaded);

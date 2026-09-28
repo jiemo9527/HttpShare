@@ -128,6 +128,7 @@ public class ShareService extends Service {
         final Prefs prefs = new Prefs(this);
         final byte[] page = readAsset("web.html");
         final byte[] showmePage = readAsset("showme.html");
+        final byte[] mountBat = readAsset("mount.bat");
         new Thread(() -> {
             try {
                 SSLContext ssl = prefs.https() ? Tls.context(getFilesDir()) : null;
@@ -174,6 +175,11 @@ public class ShareService extends Service {
                     @Override
                     public boolean webdav() {
                         return prefs.webdav();
+                    }
+
+                    @Override
+                    public byte[] mountBat() {
+                        return mountBat;
                     }
                 };
                 HttpServer s = new HttpServer(cfg, prefs.port(), ssl, ShareService::log);

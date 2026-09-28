@@ -74,6 +74,22 @@ class StaticTest(unittest.TestCase):
         web = read(MAIN / "assets/web.html")
         self.assertIn("/api/zip?p=", web)
 
+    def test_windows_mount_script(self):
+        srv = read(JAVA / "server/HttpServer.java")
+        self.assertIn('case "/api/mount.bat":', srv)
+        # Host header goes into a .bat: must be validated
+        self.assertIn("SAFE_HOST.matcher(host).matches()", srv)
+        bat = read(MAIN / "assets/mount.bat")
+        for ph in ("{URL}", "{NEED_BASIC}", "{UNC}", "{PERSIST}", "{NOTE}"):
+            self.assertIn(ph, bat)
+        # password is typed at runtime, never embedded
+        self.assertIn('"%DAV_URL%" * /user:', bat)
+        # quoting inside for /f command must stay unquoted (^ is literal inside quotes)
+        self.assertIn("('%SYS%\\reg.exe query %KEY%", bat)
+        self.assertIn("-Verb RunAs", bat)
+        # repeated wrong password from auto-retrying clients counts once
+        self.assertIn("f[2] == digest", srv)
+
     def test_xposed_entry(self):
         self.assertEqual(read(MAIN / "assets/xposed_init").strip(),
                          "io.github.jiemo9527.httpshare.XposedInit")

@@ -48,6 +48,7 @@ import org.json.JSONObject;
  * PUT  /f/0/sub/file          上传（需上传权限；覆盖另需改名/删除权限）
  * POST /api/mkdir|rm|mv?p=..[&to=新名]
  * GET  /api/zip?p=/0/dir      文件夹打包下载（流式 ZIP）
+ * GET  /api/mount.bat         Windows 一键挂载 WebDAV 的脚本（按访问地址生成）
  * *    /dav/...               WebDAV（仅 HTTP Basic 认证，见 {@link #dav}）
  * </pre>
  *
@@ -75,6 +76,9 @@ public final class HttpServer {
 
         /** 是否在 /dav/ 提供 WebDAV */
         boolean webdav();
+
+        /** Windows 挂载脚本模板（assets/mount.bat） */
+        byte[] mountBat();
     }
 
     public static final class Share {
@@ -209,6 +213,8 @@ public final class HttpServer {
         final Map<String, String> query = new HashMap<>();
         final Map<String, String> headers = new HashMap<>();
         String ip;
+        /** 来自本机回环（Cloudflare 隧道或 adb 转发） */
+        boolean loopback;
         long contentLength;
         InputStream body;
         /** Transfer-Encoding: chunked；未被处理的 chunked 请求体无法跳过，只能断开连接 */
@@ -311,7 +317,8 @@ public final class HttpServer {
         String cl = r.h("content-length");
         // 经 Cloudflare 隧道进来的连接都来自 127.0.0.1，取真实客户端 IP（仅信任本机回环来源）
         String cf = r.h("cf-connecting-ip");
-        if (cf != null && ("127.0.0.1".equals(ip) || "::1".equals(ip)) && cf.length() < 64) {
+        r.loopback = "127.0.0.1".equals(ip) || "::1".equals(ip);
+        if (cf != null && r.loopback && cf.length() < 64) {
             r.ip = cf;
         }
         try {
@@ -470,6 +477,8 @@ public final class HttpServer {
                 return listDir(out, resolve(param(r, "p")));
             case "/api/zip":
                 return zip(r, out, resolve(param(r, "p")));
+            case "/api/mount.bat":
+                return mountBat(r, out);
             case "/api/mkdir": {
                 requireUpload();
                 Target t = resolve(param(r, "p"));
@@ -556,9 +565,10 @@ public final class HttpServer {
                 String up = new String(android.util.Base64.decode(a.substring(6).trim(),
                         android.util.Base64.DEFAULT), StandardCharsets.UTF_8);
                 int c = up.indexOf(':');
-                boolean good = config.checkPassword(c >= 0 ? up.substring(c + 1) : up);
+                String pw = c >= 0 ? up.substring(c + 1) : up;
+                boolean good = config.checkPassword(pw);
                 if (!good) {
-                    fail(r.ip);
+                    fail(r.ip, pw);
                 }
                 return good;
             } catch (Exception ignored) {
@@ -567,18 +577,52 @@ public final class HttpServer {
         return false;
     }
 
+    private final byte[] failSalt = new byte[16];
+
+    {
+        new SecureRandom().nextBytes(failSalt);
+    }
+
+    private long pwDigest(String pw) {
+        try {
+            java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+            md.update(failSalt);
+            byte[] d = md.digest(pw.getBytes(StandardCharsets.UTF_8));
+            long v = 0;
+            for (int i = 0; i < 8; i++) {
+                v = (v << 8) | (d[i] & 0xff);
+            }
+            return v == 0 ? 1 : v;
+        } catch (Exception e) {
+            return pw.hashCode() | 1L;
+        }
+    }
+
     private boolean locked(String ip) {
         long[] f = fails.get(ip);
         return f != null && f[0] >= MAX_FAILS && System.currentTimeMillis() - f[1] < LOCK_MS;
     }
 
-    private void fail(String ip) {
-        long[] f = fails.computeIfAbsent(ip, k -> new long[2]);
+    /**
+     * 记一次密码错误。同一 IP 反复提交同一个错误密码只算一次：
+     * Windows 资源管理器、WebDAV 客户端对每个请求都会带上同一个密码自动重试，
+     * 输错一次就会在一秒内发出多个请求，不去重的话用户实际只输错一次就被封锁。
+     * 用于判断的是加盐摘要，不在内存里保存错误密码原文。
+     */
+    private void fail(String ip, String pw) {
+        long[] f = fails.computeIfAbsent(ip, k -> new long[3]);
         long n;
+        long digest = pwDigest(pw);
         synchronized (f) {
             if (System.currentTimeMillis() - f[1] > LOCK_MS) {
                 f[0] = 0;
+                f[2] = 0;
             }
+            if (f[0] > 0 && f[2] == digest && f[0] < MAX_FAILS) {
+                f[1] = System.currentTimeMillis();
+                return;
+            }
+            f[2] = digest;
             n = ++f[0];
             f[1] = System.currentTimeMillis();
         }
@@ -615,7 +659,7 @@ public final class HttpServer {
         }
         String pw = new String(b, 0, off, StandardCharsets.UTF_8);
         if (!config.checkPassword(pw)) {
-            fail(r.ip);
+            fail(r.ip, pw);
             long[] f = fails.get(r.ip);
             long left = MAX_FAILS - f[0];
             throw new HttpError(left > 0 ? 403 : 429, left > 0
@@ -990,6 +1034,68 @@ public final class HttpServer {
                 }
             }
         }
+    }
+
+    // ================================================================== Windows 一键挂载脚本
+
+    /** 只允许主机名 / IPv4 / [IPv6] 加可选端口，防止写进 .bat 后被当作命令执行 */
+    private static final java.util.regex.Pattern SAFE_HOST =
+            java.util.regex.Pattern.compile("^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,62})(?:\\.[A-Za-z0-9-]{1,63})*|\\[[0-9A-Fa-f:.]+\\])(?::[0-9]{1,5})?$");
+
+    /**
+     * 按浏览器实际访问的地址生成 .bat：检查/修改 WebClient 注册表（需要时弹一次 UAC），
+     * 然后以普通权限映射盘符（管理员身份映射的盘符在资源管理器里看不到）。
+     * 脚本里不写入密码，由 net use 在运行时提示输入。
+     */
+    private boolean mountBat(Req r, OutputStream out) throws Exception {
+        if (!config.webdav()) {
+            throw new HttpError(404, "WebDAV 未开启");
+        }
+        String host = r.h("host");
+        if (host == null || host.length() > 255 || !SAFE_HOST.matcher(host).matches()) {
+            throw new HttpError(400, "无法识别访问地址");
+        }
+        String scheme = ssl != null ? "https" : "http";
+        String fp = r.h("x-forwarded-proto");
+        if (r.loopback && ("https".equals(fp) || "http".equals(fp))) {
+            scheme = fp;
+        }
+        boolean tunnel = host.toLowerCase(Locale.ROOT).endsWith(".trycloudflare.com");
+        if (tunnel) {
+            scheme = "https";
+        }
+        String url = scheme + "://" + host + "/dav/";
+        boolean http = scheme.equals("http");
+        // net use 列表里 WebDAV 显示为 UNC：\\主机[@SSL][@端口]\dav，用来识别是否已经挂载过
+        String h = host;
+        String port = null;
+        int colon = host.lastIndexOf(':');
+        if (colon > host.lastIndexOf(']')) {
+            h = host.substring(0, colon);
+            port = host.substring(colon + 1);
+        }
+        if (port != null && port.equals(http ? "80" : "443")) {
+            port = null;
+        }
+        String unc = "\\\\" + h + (http ? "" : "@SSL") + (port != null ? "@" + port : "") + "\\dav";
+        String note;
+        if (tunnel) {
+            note = "echo  提示：这是 Cloudflare 临时隧道地址，手机上的服务重启后地址会变，本盘符随之失效，届时请在网页上重新下载脚本。\r\n";
+        } else if (ssl != null) {
+            note = "echo  提示：HTTPS 使用自签名证书，Windows 不信任时无法挂载，可改用 Cloudflare 隧道地址或关闭 App 的 HTTPS。\r\n";
+        } else {
+            note = "echo  提示：已设为开机自动重连（重连时 Windows 可能再次询问密码）；手机 IP 或端口变化后请重新下载运行脚本。\r\n";
+        }
+        String bat = new String(config.mountBat(), StandardCharsets.UTF_8)
+                .replace("{URL}", url)
+                .replace("{NEED_BASIC}", http ? "1" : "0")
+                .replace("{UNC}", unc)
+                .replace("{PERSIST}", tunnel ? "no" : "yes")
+                .replace("{NOTE}", note)
+                .replace("\r\n", "\n").replace("\n", "\r\n");
+        log(r.ip + " 下载 Windows 挂载脚本（" + url + "）");
+        return send(out, 200, "application/octet-stream", bat.getBytes(StandardCharsets.UTF_8), r.method.equals("HEAD"),
+                null, "Content-Disposition: attachment; filename=\"HttpShare-WebDAV.bat\"\r\n");
     }
 
     // ================================================================== WebDAV
