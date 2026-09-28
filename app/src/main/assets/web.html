@@ -16,7 +16,7 @@ h1{font-size:17px;margin:0 8px 0 0;white-space:nowrap}
 .crumbs{flex:1;min-width:0;display:flex;flex-wrap:wrap;gap:2px;align-items:center;color:var(--mut)}
 .crumbs a{color:var(--acc);text-decoration:none;padding:2px 4px;border-radius:4px;overflow-wrap:anywhere}
 .crumbs a:hover{background:var(--hover)}
-button,.btn{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);padding:6px 12px;border-radius:8px;cursor:pointer;white-space:nowrap}
+button,.btn{text-decoration:none;font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);padding:6px 12px;border-radius:8px;cursor:pointer;white-space:nowrap}
 button:hover{border-color:var(--acc)}
 button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
 button.danger{color:var(--red)}
@@ -74,6 +74,7 @@ input{font:inherit;padding:7px 10px;border-radius:8px;border:1px solid var(--lin
 <header><div class="bar">
   <h1>📁 HTTP 共享</h1>
   <div class="crumbs" id="crumbs"></div>
+  <a class="btn" href="/showme" title="跟随手机 App 当前打开的目录">同步查阅</a>
   <button id="logout" class="hidden">退出</button>
 </div></header>
 <main>
@@ -114,7 +115,7 @@ $('logout').onclick=async()=>{await fetch('/api/logout',{method:'POST'});locatio
 async function boot(){info=await (await fetch('/api/info',{credentials:'same-origin'})).json();
  if(info.auth&&!info.loggedIn)return showLogin();
  $('login').classList.add('hidden');$('app').classList.remove('hidden');
- $('logout').classList.toggle('hidden',!info.auth);$('wtools').classList.toggle('hidden',!info.write);route()}
+ $('logout').classList.toggle('hidden',!info.auth);$('wtools').classList.toggle('hidden',!info.upload);route()}
 function route(){cur=decodeURIComponent(location.hash.slice(1)||'');$('filter').value='';cur?loadDir():loadShares()}
 window.onhashchange=route;
 function crumbs(shareName){const c=$('crumbs');let h='<a href="#">全部共享</a>';if(cur){const s=cur.split('/').filter(Boolean);let acc='';
@@ -132,7 +133,7 @@ function render(){const f=$('filter').value.toLowerCase();let list=entries.filte
  for(const e of list){const p=cur+'/'+e.n;const href=e.d?'#'+esc(encodeURIComponent(p)):'/f'+esc(enc(p));
   h+='<div class="row" data-n="'+esc(e.n)+'"><span class="ic">'+icon(e)+'</span><div class="name"><a href="'+href+'" '+(e.d?'':'data-f="1" target="_blank" rel="noopener"')+'>'+esc(e.n)+'</a>'
   +'<span class="sub mut">'+(e.d?'':size(e.s)+' · ')+time(e.t)+'</span></div><span class="c-size mut">'+(e.d?'':size(e.s))+'</span><span class="c-time mut">'+time(e.t)+'</span><div class="ops">'
-  +(e.d?'':'<button data-a="dl">下载</button>')+(info.write?'<button data-a="mv">改名</button><button data-a="rm" class="danger">删除</button>':'')+'</div></div>'}
+  +(e.d?'':'<button data-a="dl">下载</button>')+(info.modify?'<button data-a="mv">改名</button><button data-a="rm" class="danger">删除</button>':'')+'</div></div>'}
  if(!list.length)h+='<div class="empty">空目录</div>';$('list').innerHTML=h}
 $('filter').oninput=render;
 $('list').onclick=async ev=>{const k=ev.target.dataset.k;if(k)return sortBy(k);
@@ -151,13 +152,13 @@ $('upbtn').onclick=()=>$('file').click();$('file').onchange=e=>{upload([...e.tar
 $('mkbtn').onclick=async()=>{const n=prompt('文件夹名称');if(!n)return;try{await api('/api/mkdir?p='+encodeURIComponent(cur+'/'+n),{method:'POST'});loadDir()}catch(e){toast(e.message)}};
 function put(url,file,onp){return new Promise((ok,no)=>{const x=new XMLHttpRequest();x.open('PUT',url);x.setRequestHeader('X-HS','1');x.upload.onprogress=e=>onp(e.loaded);
  x.onload=()=>{let j={};try{j=JSON.parse(x.responseText)}catch(e){}x.status===200?ok():no(Object.assign(new Error(j.error||('HTTP '+x.status)),{status:x.status}))};x.onerror=()=>no(new Error('网络错误'));x.send(file)})}
-async function upload(files){if(!info.write||!cur||!files.length)return;const pg=$('prog');pg.style.display='block';const total=files.reduce((s,f)=>s+f.size,0);let done=0,okc=0;
+async function upload(files){if(!info.upload||!cur||!files.length)return;const pg=$('prog');pg.style.display='block';const total=files.reduce((s,f)=>s+f.size,0);let done=0,okc=0;
  for(const f of files){const url='/f'+enc(cur+'/'+f.name);const onp=l=>{$('ptxt').textContent='上传 '+f.name+'  '+size(done+l)+' / '+size(total);$('pbar').style.width=(total?(done+l)/total*100:100)+'%'};
-  try{await put(url,f,onp);okc++}catch(e){if(e.status===409&&confirm('「'+f.name+'」已存在，覆盖？')){try{await put(url+'?overwrite=1',f,onp);okc++}catch(e2){toast(f.name+': '+e2.message)}}else if(e.status!==409)toast(f.name+': '+e.message)}
+  try{await put(url,f,onp);okc++}catch(e){if(e.status===409&&!info.modify){toast(f.name+'：已存在（无覆盖权限）')}else if(e.status===409&&confirm('「'+f.name+'」已存在，覆盖？')){try{await put(url+'?overwrite=1',f,onp);okc++}catch(e2){toast(f.name+': '+e2.message)}}else if(e.status!==409)toast(f.name+': '+e.message)}
   done+=f.size}
  pg.style.display='none';toast('已上传 '+okc+'/'+files.length);loadDir()}
 let dc=0;const drop=$('drop');
-addEventListener('dragenter',e=>{if(info.write&&cur&&e.dataTransfer.types.includes('Files')){dc++;drop.style.display='flex'}});
+addEventListener('dragenter',e=>{if(info.upload&&cur&&e.dataTransfer.types.includes('Files')){dc++;drop.style.display='flex'}});
 addEventListener('dragleave',()=>{if(--dc<=0){dc=0;drop.style.display='none'}});
 addEventListener('dragover',e=>e.preventDefault());
 addEventListener('drop',e=>{e.preventDefault();dc=0;drop.style.display='none';upload([...e.dataTransfer.files])});

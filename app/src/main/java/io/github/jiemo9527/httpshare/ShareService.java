@@ -44,6 +44,10 @@ public class ShareService extends Service {
     public static volatile int port;
     private static final LinkedList<String> LOG = new LinkedList<>();
     public static volatile Runnable onChange;
+    public static final int MAX_LOG = 3000;
+    /** 同步查阅：服务运行期间可用；App 浏览页调用 publish */
+    public static volatile io.github.jiemo9527.httpshare.server.ShowMe showme;
+    public static volatile HttpServer current;
 
     private HttpServer server;
     private Remote remote;
@@ -55,7 +59,7 @@ public class ShareService extends Service {
         String line = new SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(new Date()) + "  " + s;
         synchronized (LOG) {
             LOG.addFirst(line);
-            while (LOG.size() > 300) {
+            while (LOG.size() > MAX_LOG) {
                 LOG.removeLast();
             }
         }
@@ -123,6 +127,7 @@ public class ShareService extends Service {
         }
         final Prefs prefs = new Prefs(this);
         final byte[] page = readAsset("web.html");
+        final byte[] showmePage = readAsset("showme.html");
         new Thread(() -> {
             try {
                 SSLContext ssl = prefs.https() ? Tls.context(getFilesDir()) : null;
@@ -137,8 +142,13 @@ public class ShareService extends Service {
                     }
 
                     @Override
-                    public boolean allowWrite() {
-                        return prefs.allowWrite();
+                    public boolean allowUpload() {
+                        return prefs.allowUpload();
+                    }
+
+                    @Override
+                    public boolean allowModify() {
+                        return prefs.allowModify();
                     }
 
                     @Override
@@ -155,11 +165,18 @@ public class ShareService extends Service {
                     public byte[] webPage() {
                         return page;
                     }
+
+                    @Override
+                    public byte[] showmePage() {
+                        return showmePage;
+                    }
                 };
                 HttpServer s = new HttpServer(cfg, prefs.port(), ssl, ShareService::log);
                 s.start();
                 main.post(() -> {
                     server = s;
+                    current = s;
+                    showme = s.showme();
                     running = true;
                     error = null;
                     scheme = ssl != null ? "https" : "http";
@@ -275,6 +292,8 @@ public class ShareService extends Service {
         Remote.state = "";
         Remote.url = null;
         if (server != null) {
+            showme = null;
+            current = null;
             server.stop();
             server = null;
             log("服务已停止");

@@ -39,12 +39,13 @@ import org.json.JSONObject;
  *
  * <pre>
  * GET  /                      网页（assets/web.html，单页应用）
- * GET  /api/info              {auth, loggedIn, write, https}
+ * GET  /api/info              {auth, loggedIn, upload, modify, https}
+ * GET  /showme                同步查阅页；GET /api/showme?v=版本&c=客户端  长轮询当前目录
  * POST /api/login             body=密码，成功设置会话 Cookie
  * POST /api/logout
  * GET  /api/ls?p=/0/sub       目录列表（p 的第一段为共享序号）
  * GET  /f/0/sub/file[?dl=1]   下载，支持 Range
- * PUT  /f/0/sub/file          上传（需开启写入）
+ * PUT  /f/0/sub/file          上传（需上传权限；覆盖另需改名/删除权限）
  * POST /api/mkdir|rm|mv?p=..[&to=新名]
  * </pre>
  *
@@ -56,13 +57,19 @@ public final class HttpServer {
     public interface Config {
         List<Share> shares();
 
-        boolean allowWrite();
+        /** 上传 / 新建文件夹 */
+        boolean allowUpload();
+
+        /** 改名 / 删除 / 覆盖 */
+        boolean allowModify();
 
         boolean hasPassword();
 
         boolean checkPassword(String pw);
 
         byte[] webPage();
+
+        byte[] showmePage();
     }
 
     public static final class Share {
@@ -82,8 +89,8 @@ public final class HttpServer {
     }
 
     private static final long SESSION_TTL = 7L * 24 * 3600 * 1000;
-    private static final int MAX_FAILS = 8;
-    private static final long LOCK_MS = 5 * 60 * 1000;
+    public static final int MAX_FAILS = 3;
+    public static final long LOCK_MS = 2L * 3600 * 1000;
 
     private final Config config;
     private final int port;
@@ -92,8 +99,10 @@ public final class HttpServer {
     private final FileBackend local = new LocalBackend();
     private final FileBackend root = new RootBackend();
     private final Map<String, Long> sessions = new ConcurrentHashMap<>();
+    /** 登录失败记录只在内存：重启服务即解除封锁 */
     private final Map<String, long[]> fails = new ConcurrentHashMap<>();
     private final SecureRandom random = new SecureRandom();
+    private final ShowMe showme = new ShowMe();
 
     private ServerSocket server;
     private ExecutorService pool;
@@ -104,6 +113,27 @@ public final class HttpServer {
         this.port = port;
         this.ssl = ssl;
         this.listener = listener;
+    }
+
+    public ShowMe showme() {
+        return showme;
+    }
+
+    /** 当前被封锁的 IP 与剩余毫秒 */
+    public Map<String, Long> lockedIps() {
+        Map<String, Long> out = new HashMap<>();
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, long[]> e : fails.entrySet()) {
+            long[] v = e.getValue();
+            if (v[0] >= MAX_FAILS && now - v[1] < LOCK_MS) {
+                out.put(e.getKey(), LOCK_MS - (now - v[1]));
+            }
+        }
+        return out;
+    }
+
+    public void unlockAll() {
+        fails.clear();
     }
 
     public void start() throws IOException {
@@ -122,6 +152,7 @@ public final class HttpServer {
 
     public void stop() {
         running = false;
+        showme.shutdown();
         try {
             if (server != null) {
                 server.close();
@@ -185,7 +216,7 @@ public final class HttpServer {
         }
     }
 
-    private static final class HttpError extends Exception {
+    static final class HttpError extends Exception {
         final int code;
 
         HttpError(int code, String msg) {
@@ -341,7 +372,8 @@ public final class HttpServer {
             return sendJson(out, 200, new JSONObject()
                     .put("auth", config.hasPassword())
                     .put("loggedIn", authed(r))
-                    .put("write", config.allowWrite())
+                    .put("upload", config.allowUpload())
+                    .put("modify", config.allowModify())
                     .put("https", ssl != null), null);
         }
         if (path.equals("/api/login") && m.equals("POST")) {
@@ -362,12 +394,13 @@ public final class HttpServer {
             if (!m.equals("GET") && !m.equals("HEAD")) {
                 throw new HttpError(405, "method not allowed");
             }
-            byte[] page = config.webPage();
+            boolean sm = path.equals("/showme") || path.equals("/showme/");
+            byte[] page = sm ? config.showmePage() : config.webPage();
             return send(out, 200, "text/html; charset=utf-8", page, m.equals("HEAD"), null);
         }
 
         if (!authed(r)) {
-            throw new HttpError(401, "需要密码");
+            throw new HttpError(401, locked(r.ip) ? "尝试次数过多，已封锁" : "需要密码");
         }
         boolean mutating = !m.equals("GET") && !m.equals("HEAD");
         if (mutating && !"1".equals(r.h("x-hs"))) {
@@ -380,13 +413,23 @@ public final class HttpServer {
                 return download(r, out, t);
             }
             if (m.equals("PUT")) {
-                requireWrite();
+                requireUpload();
                 return upload(r, out, t);
             }
             throw new HttpError(405, "method not allowed");
         }
 
         switch (path) {
+            case "/api/showme": {
+                long v;
+                try {
+                    v = Long.parseLong(r.q("v") == null ? "-1" : r.q("v"));
+                } catch (NumberFormatException e) {
+                    v = -1;
+                }
+                String cid = r.q("c");
+                return sendJson(out, 200, showme.poll(cid == null ? r.ip : cid, v), null);
+            }
             case "/api/shares": {
                 JSONArray a = new JSONArray();
                 List<Share> list = config.shares();
@@ -399,14 +442,14 @@ public final class HttpServer {
             case "/api/ls":
                 return listDir(out, resolve(param(r, "p")));
             case "/api/mkdir": {
-                requireWrite();
+                requireUpload();
                 Target t = resolve(param(r, "p"));
                 t.fs.mkdir(t.abs);
                 log(r.ip + " 新建目录 " + t.abs);
                 return ok(out);
             }
             case "/api/rm": {
-                requireWrite();
+                requireModify();
                 Target t = resolve(param(r, "p"));
                 if (t.rel.isEmpty()) {
                     throw new HttpError(400, "不能删除共享根目录");
@@ -416,7 +459,7 @@ public final class HttpServer {
                 return ok(out);
             }
             case "/api/mv": {
-                requireWrite();
+                requireModify();
                 Target t = resolve(param(r, "p"));
                 String to = param(r, "to");
                 if (t.rel.isEmpty() || !validName(to)) {
@@ -432,9 +475,15 @@ public final class HttpServer {
         }
     }
 
-    private void requireWrite() throws HttpError {
-        if (!config.allowWrite()) {
-            throw new HttpError(403, "未开启写入权限");
+    private void requireUpload() throws HttpError {
+        if (!config.allowUpload()) {
+            throw new HttpError(403, "未开启上传/新建权限");
+        }
+    }
+
+    private void requireModify() throws HttpError {
+        if (!config.allowModify()) {
+            throw new HttpError(403, "未开启改名/删除权限");
         }
     }
 
@@ -491,14 +540,24 @@ public final class HttpServer {
 
     private void fail(String ip) {
         long[] f = fails.computeIfAbsent(ip, k -> new long[2]);
+        long n;
         synchronized (f) {
             if (System.currentTimeMillis() - f[1] > LOCK_MS) {
                 f[0] = 0;
             }
-            f[0]++;
+            n = ++f[0];
             f[1] = System.currentTimeMillis();
         }
-        log(ip + " 密码错误（" + f[0] + "）");
+        if (n >= MAX_FAILS) {
+            log(ip + " 密码连续错误 " + n + " 次，封锁 2 小时（重启服务可解除）");
+        } else {
+            log(ip + " 密码错误（" + n + "/" + MAX_FAILS + "）");
+        }
+    }
+
+    private static String remain(long ms) {
+        long m = (ms + 59_999) / 60_000;
+        return m >= 60 ? (m / 60) + " 小时 " + (m % 60) + " 分钟" : m + " 分钟";
     }
 
     private boolean login(Req r, OutputStream out) throws Exception {
@@ -516,12 +575,18 @@ public final class HttpServer {
         }
         r.contentLength = 0;
         if (locked(r.ip)) {
-            throw new HttpError(429, "尝试次数过多，请 5 分钟后再试");
+            long[] f = fails.get(r.ip);
+            throw new HttpError(429, "密码错误次数过多，已封锁，请 "
+                    + remain(LOCK_MS - (System.currentTimeMillis() - f[1])) + " 后再试");
         }
         String pw = new String(b, 0, off, StandardCharsets.UTF_8);
         if (!config.checkPassword(pw)) {
             fail(r.ip);
-            throw new HttpError(403, "密码错误");
+            long[] f = fails.get(r.ip);
+            long left = MAX_FAILS - f[0];
+            throw new HttpError(left > 0 ? 403 : 429, left > 0
+                    ? "密码错误，还可尝试 " + left + " 次"
+                    : "密码错误次数过多，已封锁 2 小时");
         }
         fails.remove(r.ip);
         byte[] rnd = new byte[24];
@@ -708,6 +773,9 @@ public final class HttpServer {
         }
         if (st != null && !"1".equals(r.q("overwrite"))) {
             throw new HttpError(409, "文件已存在");
+        }
+        if (st != null) {
+            requireModify(); // 覆盖等同于修改已有文件
         }
         long len = r.contentLength;
         r.contentLength = 0; // 由 write 负责读取

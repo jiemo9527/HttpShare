@@ -20,14 +20,32 @@ class StaticTest(unittest.TestCase):
         self.assertIn("Intent.ACTION_VIEW", src)
         self.assertIn("ActivityNotFoundException", src)
 
-    def test_icon_alias_and_auto_hide(self):
+    def test_icon_alias_no_auto_hide(self):
         manifest = read(MAIN / "AndroidManifest.xml")
         self.assertRegex(manifest, r'activity-alias[^>]*\.Launcher')
         self.assertIn("MODULE_SETTINGS", manifest)
         src = read(JAVA / "MainActivity.java")
         self.assertIn("ModuleStatus.isActive()", src)
-        self.assertIn("autoHideIcon()", src)
+        # 0.3: icon is only hidden manually; old auto-hide is gone and restored once
+        self.assertNotIn("autoHideIcon", src + read(JAVA / "Prefs.java"))
+        self.assertIn("restoreIconOnce()", src)
         self.assertIn('ModuleStatus.class.getName()', read(JAVA / "XposedInit.java"))
+
+    def test_split_permissions_and_lockout(self):
+        srv = read(JAVA / "server/HttpServer.java")
+        self.assertIn("allowUpload()", srv)
+        self.assertIn("allowModify()", srv)
+        self.assertNotIn("allowWrite", srv + read(JAVA / "Prefs.java"))
+        self.assertRegex(srv, r"MAX_FAILS\s*=\s*3\b")
+        self.assertRegex(srv, r"LOCK_MS\s*=\s*2L\s*\*\s*3600\s*\*\s*1000\s*;")
+        self.assertRegex(read(JAVA / "ShareService.java"), r"MAX_LOG\s*=\s*3000\b")
+
+    def test_showme_uses_polling(self):
+        # Cloudflare quick tunnels buffer text/event-stream; must stay request/response
+        page = read(MAIN / "assets/showme.html")
+        self.assertNotIn("EventSource", page)
+        self.assertIn("/api/showme?v=", page)
+        self.assertNotIn('"Content-Type: text/event-stream', read(JAVA / "server/ShowMe.java") + read(JAVA / "server/HttpServer.java"))
 
     def test_xposed_entry(self):
         self.assertEqual(read(MAIN / "assets/xposed_init").strip(),

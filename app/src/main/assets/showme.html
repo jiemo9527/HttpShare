@@ -1,0 +1,124 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>同步查阅 · HTTP 共享</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1d2126;--mut:#6b7380;--line:#e3e6ea;--acc:#0f8a6b;--red:#c62828;--hover:#f0f3f5}
+@media (prefers-color-scheme:dark){:root{--bg:#111416;--card:#1a1e21;--fg:#e6e8ea;--mut:#8d96a0;--line:#2a3035;--acc:#35c49a;--red:#ef5350;--hover:#22282c}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif}
+header{position:sticky;top:0;z-index:5;background:var(--card);border-bottom:1px solid var(--line);padding:10px max(14px,env(safe-area-inset-left))}
+.bar{max-width:1100px;margin:0 auto;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+h1{font-size:17px;margin:0;white-space:nowrap}
+#path{flex:1;min-width:0;color:var(--mut);overflow-wrap:anywhere}
+#path b{color:var(--fg);font-weight:600}
+.st{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--mut);white-space:nowrap}
+.dot{width:9px;height:9px;border-radius:50%;background:#aaa}
+.dot.on{background:#2ecc71;box-shadow:0 0 0 3px rgba(46,204,113,.25)}
+.dot.off{background:var(--red)}
+a.btn,button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--fg);padding:6px 12px;border-radius:8px;cursor:pointer;text-decoration:none;white-space:nowrap}
+button.pri{background:var(--acc);border-color:var(--acc);color:#fff}
+main{max-width:1100px;margin:0 auto;padding:12px max(14px,env(safe-area-inset-left)) 40px}
+.list{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.row{display:grid;grid-template-columns:28px 1fr 110px 150px;gap:8px;align-items:center;padding:9px 12px;border-top:1px solid var(--line)}
+.row:first-child{border-top:0}
+.row:hover{background:var(--hover)}
+.row.new{animation:fl 1.2s ease-out}
+@keyframes fl{from{background:rgba(15,138,107,.22)}to{background:transparent}}
+.ic{font-size:18px;text-align:center}
+.name{overflow-wrap:anywhere;min-width:0}
+.name a{color:var(--fg);text-decoration:none}
+.name a:hover{color:var(--acc)}
+.mut{color:var(--mut);font-size:12px}
+.empty{padding:48px 20px;text-align:center;color:var(--mut)}
+.tag{font-size:11px;border:1px solid var(--red);color:var(--red);border-radius:4px;padding:0 4px;margin-left:6px}
+@media (max-width:720px){.row{grid-template-columns:28px 1fr}.c-size,.c-time{display:none}.name .sub{display:block}
+ h1{flex:1}#path{order:9;flex-basis:100%;font-size:13px}}
+@media (min-width:721px){.name .sub{display:none}}
+#login{max-width:360px;margin:12vh auto;background:var(--card);border:1px solid var(--line);border-radius:14px;padding:24px}
+#login input{width:100%;margin:12px 0;font:inherit;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+#login button{width:100%}
+.err{color:var(--red);min-height:1.5em}
+#viewer{position:fixed;inset:0;background:rgba(0,0,0,.88);display:none;align-items:center;justify-content:center;z-index:40;flex-direction:column}
+#viewer img,#viewer video{max-width:96vw;max-height:86vh}
+#viewer .vt{color:#fff;margin-top:8px;max-width:90vw;overflow-wrap:anywhere}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<div id="login" class="hidden">
+  <h2 style="margin:0">🔒 需要访问密码</h2>
+  <input id="pw" type="password" autocomplete="current-password" placeholder="密码">
+  <div class="err" id="lerr"></div>
+  <button class="pri" id="lbtn">进入</button>
+</div>
+<div id="app" class="hidden">
+<header><div class="bar">
+  <h1>👀 同步查阅</h1>
+  <div id="path">等待手机打开目录…</div>
+  <span class="st"><i class="dot" id="dot"></i><span id="stt">连接中</span></span>
+  <a class="btn" href="/" id="open">在文件页打开</a>
+</div></header>
+<main><div class="list" id="list"><div class="empty">手机 App 的「浏览」页打开某个目录后，这里会自动显示同一目录</div></div></main>
+</div>
+<div id="viewer"><div id="vbox"></div><div class="vt" id="vt"></div></div>
+<script>
+const $=id=>document.getElementById(id);
+const enc=p=>p.split('/').map(encodeURIComponent).join('/');
+let cur='',seq=0;
+function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function size(n){if(n<1024)return n+' B';const u=['KB','MB','GB','TB'];let i=-1;do{n/=1024;i++}while(n>=1024&&i<3);return n.toFixed(n<10?2:1)+' '+u[i]}
+function time(t){if(!t)return'';const d=new Date(t),p=x=>String(x).padStart(2,'0');return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())}
+function icon(e){if(e.d)return'📁';const x=(e.n.split('.').pop()||'').toLowerCase();
+ if(/^(jpe?g|png|gif|webp|bmp|heic|svg)$/.test(x))return'🖼️';if(/^(mp4|mkv|webm|mov|3gp|avi)$/.test(x))return'🎬';
+ if(/^(mp3|m4a|flac|wav|ogg|aac|opus|amr)$/.test(x))return'🎵';if(/^(zip|rar|7z|tar|gz|xz)$/.test(x))return'🗜️';if(x==='apk')return'📦';
+ if(/^(txt|log|md|json|xml|prop|conf|ini)$/.test(x))return'📄';return'📃'}
+function status(k,t){$('dot').className='dot '+k;$('stt').textContent=t}
+function showLogin(){$('app').classList.add('hidden');$('login').classList.remove('hidden');$('pw').focus()}
+async function login(){$('lerr').textContent='';try{const r=await fetch('/api/login',{method:'POST',body:$('pw').value,credentials:'same-origin'});const j=await r.json();if(!r.ok)throw new Error(j.error);$('pw').value='';boot()}catch(e){$('lerr').textContent=e.message}}
+$('lbtn').onclick=login;$('pw').onkeydown=e=>{if(e.key==='Enter')login()};
+async function boot(){const info=await (await fetch('/api/info',{credentials:'same-origin'})).json();
+ if(info.auth&&!info.loggedIn)return showLogin();
+ $('login').classList.add('hidden');$('app').classList.remove('hidden');alive=true;connect()}
+// 长轮询：服务端在目录变化时立即返回，否则 25 秒后返回当前状态（兼容 Cloudflare 隧道等会缓冲流式响应的代理）
+const cid=Math.random().toString(36).slice(2,10);let ver=-1,alive=true,fails=0;
+async function connect(){status('','连接中');
+ while(alive){
+  try{const ctl=new AbortController(),to=setTimeout(()=>ctl.abort(),40000);
+   const r=await fetch('/api/showme?v='+ver+'&c='+cid,{credentials:'same-origin',cache:'no-store',signal:ctl.signal});clearTimeout(to);
+   if(r.status===401){alive=false;return showLogin()}
+   if(!r.ok)throw new Error('HTTP '+r.status);
+   const m=await r.json();fails=0;status('on','已同步');
+   if(m.v!==ver){ver=m.v;follow(m.p||'',m.title||'')}
+  }catch(e){fails++;status('off','连接断开，重连中…');await new Promise(r=>setTimeout(r,Math.min(10000,1000*fails)))}}}
+async function follow(p,title){
+ if(!p){cur='';$('path').textContent='手机未在浏览目录（等待中）';$('open').href='/';
+  $('list').innerHTML='<div class="empty">手机 App 的「浏览」页打开某个目录后，这里会自动显示同一目录</div>';return}
+ const my=++seq,same=p===cur;cur=p;$('open').href='/#'+encodeURIComponent(p);
+ $('path').innerHTML='<b>'+esc(title||p)+'</b>';
+ try{const r=await fetch('/api/ls?p='+encodeURIComponent(p),{credentials:'same-origin'});const j=await r.json();
+  if(my!==seq)return;
+  if(r.status===401){alive=false;return showLogin()}
+  if(!r.ok)throw new Error(j.error||('HTTP '+r.status));
+  if(j.root)$('path').innerHTML+='<span class="tag">ROOT</span>';
+  render(j.entries,same)}catch(e){if(my===seq)$('list').innerHTML='<div class="empty">'+esc(e.message)+'</div>'}}
+function render(list,same){
+ list.sort((a,b)=>a.d!==b.d?(a.d?-1:1):a.n.localeCompare(b.n,'zh',{numeric:true}));
+ let h='';for(const e of list){const fp='/f'+enc(cur+'/'+e.n);
+  const link=e.d?'<a href="/#'+esc(encodeURIComponent(cur+'/'+e.n))+'">'+esc(e.n)+'</a>':'<a href="'+esc(fp)+'" data-f="1" target="_blank" rel="noopener">'+esc(e.n)+'</a>';
+  h+='<div class="row'+(same?'':' new')+'"><span class="ic">'+icon(e)+'</span><div class="name">'+link+'<span class="sub mut">'+(e.d?'':size(e.s)+' · ')+time(e.t)+'</span></div><span class="c-size mut">'+(e.d?'':size(e.s))+'</span><span class="c-time mut">'+time(e.t)+'</span></div>'}
+ $('list').innerHTML=h||'<div class="empty">空目录</div>'}
+$('list').onclick=ev=>{const a=ev.target.closest('a[data-f]');if(!a)return;const n=a.textContent,x=(n.split('.').pop()||'').toLowerCase(),src=a.getAttribute('href');let el;
+ if(/^(jpe?g|png|gif|webp|bmp)$/.test(x))el=document.createElement('img');
+ else if(/^(mp4|webm|mov|m4v)$/.test(x)){el=document.createElement('video');el.controls=el.autoplay=true}
+ else if(/^(mp3|m4a|flac|wav|ogg|aac|opus)$/.test(x)){el=document.createElement('audio');el.controls=el.autoplay=true}else return;
+ ev.preventDefault();el.src=src;$('vbox').innerHTML='';$('vbox').appendChild(el);$('vt').textContent=n+'（点击空白处关闭）';$('viewer').style.display='flex'};
+$('viewer').onclick=e=>{if(e.target.tagName==='VIDEO'||e.target.tagName==='AUDIO')return;$('viewer').style.display='none';$('vbox').innerHTML=''};
+document.onkeydown=e=>{if(e.key==='Escape')$('viewer').click()};
+boot().catch(e=>status('off',e.message));
+</script>
+</body>
+</html>

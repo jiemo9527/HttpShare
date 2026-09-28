@@ -14,9 +14,9 @@ import java.lang.reflect.Method;
 /**
  * 作用域：
  * <ul>
- *   <li>本应用：让 {@link ModuleStatus#isActive()} 返回 true，界面据此自动隐藏桌面图标。</li>
+ *   <li>本应用：让 {@link ModuleStatus#isActive()} 返回 true，界面显示“模块已生效”。</li>
  *   <li>系统框架：Android 10+ 对“声明了权限却没有启动器入口”的应用会生成指向应用详情的替身图标，
- *       这里让 LauncherAppsService.shouldShowSyntheticActivity 对本包返回 false，隐藏才彻底。</li>
+ *       这里让 LauncherAppsService.shouldShowSyntheticActivity 对本包返回 false，手动隐藏图标时才彻底。</li>
  * </ul>
  */
 public class XposedInit implements IXposedHookLoadPackage {

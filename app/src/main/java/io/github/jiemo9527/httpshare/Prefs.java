@@ -87,12 +87,22 @@ public final class Prefs {
         sp.edit().putBoolean("https", b).apply();
     }
 
-    public boolean allowWrite() {
-        return sp.getBoolean("write", false);
+    /** 上传 / 新建文件夹 */
+    public boolean allowUpload() {
+        return sp.getBoolean("perm_upload", sp.getBoolean("write", false));
     }
 
-    public void setAllowWrite(boolean b) {
-        sp.edit().putBoolean("write", b).apply();
+    public void setAllowUpload(boolean b) {
+        sp.edit().putBoolean("perm_upload", b).apply();
+    }
+
+    /** 改名 / 删除 / 覆盖已有文件 */
+    public boolean allowModify() {
+        return sp.getBoolean("perm_modify", sp.getBoolean("write", false));
+    }
+
+    public void setAllowModify(boolean b) {
+        sp.edit().putBoolean("perm_modify", b).apply();
     }
 
     // ---------------------------------------------------------------- 访问密码
@@ -150,14 +160,14 @@ public final class Prefs {
         sp.edit().putInt("remote", m).apply();
     }
 
-    // ---------------------------------------------------------------- 图标
+    // ---------------------------------------------------------------- 同步查阅
 
-    /** 模块生效时自动隐藏桌面图标（默认开） */
-    public boolean autoHideIcon() {
-        return sp.getBoolean("auto_hide", true);
+    /** App 内浏览时是否向 /showme 广播当前目录 */
+    public boolean showmeSync() {
+        return sp.getBoolean("showme", true);
     }
 
-    public void setAutoHideIcon(boolean b) {
-        sp.edit().putBoolean("auto_hide", b).apply();
+    public void setShowmeSync(boolean b) {
+        sp.edit().putBoolean("showme", b).apply();
     }
 }

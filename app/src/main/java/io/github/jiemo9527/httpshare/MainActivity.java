@@ -46,13 +46,33 @@ public class MainActivity extends Activity {
     private static final String LAUNCHER_ALIAS = "io.github.jiemo9527.httpshare.Launcher";
 
     private static final int TAB_HOME = 0;
-    private static final int TAB_LOG = 1;
-    private static final int TAB_SETTINGS = 2;
+    private static final int TAB_BROWSE = 1;
+    private static final int TAB_LOG = 2;
+    private static final int TAB_SETTINGS = 3;
+    private static final int TAB_COUNT = 4;
 
     private Prefs prefs;
     private int currentTab;
-    private final View[] pages = new View[3];
-    private final TextView[] tabs = new TextView[3];
+    private final View[] pages = new View[TAB_COUNT];
+    private final TextView[] tabs = new TextView[TAB_COUNT];
+    private final TextView[] modeChips = new TextView[3];
+
+    // 浏览页（同步查阅）
+    private int browseShare = -1;
+    private String browseRel = "";
+    private int browseToken;
+    private ScrollView browseScroll;
+    private TextView browsePath;
+    private TextView browseSync;
+    private LinearLayout browseList;
+    private final android.os.Handler ui = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable syncTicker = new Runnable() {
+        @Override
+        public void run() {
+            refreshSyncInfo();
+            ui.postDelayed(this, 2000);
+        }
+    };
 
     private TextView moduleView;
     private TextView stateView;
@@ -72,7 +92,7 @@ public class MainActivity extends Activity {
         prefs = new Prefs(this);
         getWindow().setStatusBarColor(Color.TRANSPARENT);
         buildUi();
-        autoHideIcon();
+        restoreIconOnce();
         if (Build.VERSION.SDK_INT >= 33
                 && checkSelfPermission("android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{"android.permission.POST_NOTIFICATIONS"}, 1);
@@ -91,12 +111,25 @@ public class MainActivity extends Activity {
         super.onResume();
         ShareService.onChange = this::refresh;
         refresh();
+        if (currentTab == TAB_BROWSE) {
+            loadBrowse();
+        }
     }
 
     @Override
     protected void onPause() {
         ShareService.onChange = null;
+        ui.removeCallbacks(syncTicker);
         super.onPause();
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (currentTab == TAB_BROWSE && browseShare >= 0) {
+            browseUp();
+            return;
+        }
+        super.onBackPressed();
     }
 
     private void buildUi() {
@@ -123,6 +156,7 @@ public class MainActivity extends Activity {
 
         FrameLayout container = new FrameLayout(this);
         pages[TAB_HOME] = buildHomePage();
+        pages[TAB_BROWSE] = buildBrowsePage();
         pages[TAB_LOG] = buildLogPage();
         pages[TAB_SETTINGS] = buildSettingsPage();
         for (View p : pages) {
@@ -134,8 +168,8 @@ public class MainActivity extends Activity {
         divider.setBackgroundColor(LINE);
         outer.addView(divider, new LinearLayout.LayoutParams(-1, 1));
         LinearLayout nav = horizontal();
-        String[] names = {"共享", "日志", "设置"};
-        for (int i = 0; i < 3; i++) {
+        String[] names = {"共享", "浏览", "日志", "设置"};
+        for (int i = 0; i < TAB_COUNT; i++) {
             final int idx = i;
             TextView t = text(names[i], 15);
             t.setGravity(Gravity.CENTER);
@@ -151,14 +185,22 @@ public class MainActivity extends Activity {
     }
 
     private void switchTab(int idx) {
+        boolean leftBrowse = currentTab == TAB_BROWSE && idx != TAB_BROWSE;
         currentTab = idx;
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; i < TAB_COUNT; i++) {
             pages[i].setVisibility(i == idx ? View.VISIBLE : View.GONE);
             tabs[i].setTextColor(i == idx ? ACCENT : fg());
             tabs[i].setTypeface(i == idx ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
         }
         if (idx == TAB_LOG) {
             refreshLog();
+        }
+        ui.removeCallbacks(syncTicker);
+        if (idx == TAB_BROWSE) {
+            loadBrowse();
+            ui.post(syncTicker);
+        } else if (leftBrowse) {
+            publishShowme(null, null);
         }
     }
 
@@ -187,6 +229,32 @@ public class MainActivity extends Activity {
         card.addView(stateView);
         urlBox = vertical();
         card.addView(urlBox);
+
+        TextView nl = text("网络方式", 12);
+        nl.setAlpha(0.7f);
+        nl.setPadding(0, dp(12), 0, dp(4));
+        card.addView(nl);
+        LinearLayout modes = horizontal();
+        String[] mn = {"仅局域网", "自动", "CF 隧道"};
+        for (int i = 0; i < 3; i++) {
+            final int m = i;
+            TextView c = text(mn[i], 14);
+            c.setGravity(Gravity.CENTER);
+            c.setPadding(dp(4), dp(8), dp(4), dp(8));
+            c.setOnClickListener(v -> setMode(m));
+            modeChips[i] = c;
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1);
+            if (i > 0) {
+                lp.setMarginStart(dp(6));
+            }
+            modes.addView(c, lp);
+        }
+        card.addView(modes);
+        TextView mh = text("自动：有公网 IPv4 直连，否则走 Cloudflare 隧道；外网需先设访问密码。运行中切换会自动重启服务。", 11);
+        mh.setAlpha(0.6f);
+        mh.setPadding(0, dp(4), 0, 0);
+        card.addView(mh);
+
         toggleBtn = button("启动", ACCENT, true);
         toggleBtn.setOnClickListener(v -> toggleServer());
         LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(-1, -2);
@@ -297,7 +365,18 @@ public class MainActivity extends Activity {
         hs.addView(presets);
         box.addView(hs);
         box.addView(name);
-        box.addView(path);
+        LinearLayout pathRow = horizontal();
+        pathRow.setGravity(Gravity.CENTER_VERTICAL);
+        pathRow.addView(path, new LinearLayout.LayoutParams(0, -2, 1));
+        TextView pick = button("浏览…", ACCENT, false);
+        pick.setOnClickListener(v -> pickDir(path.getText().toString().trim(), root.isChecked(), chosen -> {
+            path.setText(chosen);
+            if (name.getText().length() == 0) {
+                name.setText(chosen.equals("/") ? "根目录" : chosen.substring(chosen.lastIndexOf('/') + 1));
+            }
+        }));
+        pathRow.addView(pick);
+        box.addView(pathRow);
         box.addView(root);
 
         AlertDialog.Builder b = new AlertDialog.Builder(this)
@@ -381,6 +460,53 @@ public class MainActivity extends Activity {
         return null;
     }
 
+    private void setMode(int m) {
+        if (m == prefs.remoteMode()) {
+            return;
+        }
+        if (m != Remote.MODE_OFF && !prefs.hasPassword()) {
+            toast("外网访问需要先在「设置」里设置访问密码");
+            return;
+        }
+        if (m != Remote.MODE_OFF && !Remote.binaryAvailable(ShareService.tunnelBinary(this))) {
+            toast("本机架构不支持 Cloudflare 隧道，只能公网 IPv4 直连");
+        }
+        prefs.setRemoteMode(m);
+        refreshModeChips();
+        if (ShareService.running) {
+            Intent i = new Intent(this, ShareService.class);
+            stopService(i);
+            stateView.setText("正在切换网络方式…");
+            ui.postDelayed(() -> {
+                ShareService.error = null;
+                startForegroundService(i);
+                ui.postDelayed(this::refresh, 600);
+            }, 700);
+        }
+    }
+
+    private void refreshModeChips() {
+        int cur = prefs.remoteMode();
+        for (int i = 0; i < 3; i++) {
+            TextView c = modeChips[i];
+            if (c == null) {
+                continue;
+            }
+            GradientDrawable g = new GradientDrawable();
+            g.setCornerRadius(dp(8));
+            if (i == cur) {
+                g.setColor(ACCENT);
+                c.setTextColor(Color.WHITE);
+                c.setTypeface(Typeface.DEFAULT_BOLD);
+            } else {
+                g.setStroke(dp(1), 0x88888888);
+                c.setTextColor(fg());
+                c.setTypeface(Typeface.DEFAULT);
+            }
+            c.setBackground(g);
+        }
+    }
+
     private void toggleServer() {
         Intent i = new Intent(this, ShareService.class);
         if (ShareService.running) {
@@ -395,6 +521,382 @@ public class MainActivity extends Activity {
             stateView.setText("启动中…");
         }
         stateView.postDelayed(this::refresh, 600);
+    }
+
+    // ================================================================== 浏览页（同步查阅）
+
+    private View buildBrowsePage() {
+        LinearLayout page = vertical();
+        browseSync = text("", 12);
+        browseSync.setPadding(dp(12), dp(10), dp(12), dp(10));
+        GradientDrawable g = new GradientDrawable();
+        g.setCornerRadius(dp(10));
+        g.setColor(dark() ? 0xFF1E2326 : 0xFFF3F5F7);
+        browseSync.setBackground(g);
+        browseSync.setOnClickListener(v -> {
+            String u = showmeUrl();
+            if (u != null) {
+                getSystemService(ClipboardManager.class).setPrimaryClip(ClipData.newPlainText("url", u));
+                toast("已复制 " + u);
+            }
+        });
+        page.addView(browseSync);
+
+        LinearLayout bar = horizontal();
+        bar.setGravity(Gravity.CENTER_VERTICAL);
+        bar.setPadding(0, dp(10), 0, dp(4));
+        TextView upBtn = button("↑ 上级", ACCENT, false);
+        upBtn.setOnClickListener(v -> browseUp());
+        bar.addView(upBtn);
+        browsePath = text("", 13);
+        browsePath.setTypeface(Typeface.MONOSPACE);
+        browsePath.setPadding(dp(10), 0, 0, 0);
+        bar.addView(browsePath, new LinearLayout.LayoutParams(0, -2, 1));
+        page.addView(bar);
+
+        browseList = vertical();
+        page.addView(browseList);
+        ScrollView sv = page(page);
+        browseScroll = sv;
+        return sv;
+    }
+
+    private String showmeUrl() {
+        if (!ShareService.running) {
+            return null;
+        }
+        if (Remote.url != null) {
+            return Remote.url + "/showme";
+        }
+        List<String> ips = ShareService.addresses();
+        return ShareService.scheme + "://" + (ips.isEmpty() ? "127.0.0.1" : ips.get(0)) + ":" + ShareService.port + "/showme";
+    }
+
+    private void refreshSyncInfo() {
+        if (browseSync == null) {
+            return;
+        }
+        io.github.jiemo9527.httpshare.server.ShowMe sm = ShareService.showme;
+        if (!ShareService.running || sm == null) {
+            browseSync.setText("同步查阅：服务未启动。启动后网页打开 /showme，会实时显示你在这里打开的目录。");
+            browseSync.setTextColor(fg());
+            return;
+        }
+        if (!prefs.showmeSync()) {
+            browseSync.setText("同步查阅已在设置中关闭");
+            browseSync.setTextColor(fg());
+            return;
+        }
+        int n = sm.viewers();
+        browseSync.setText("● 同步查阅中 · " + n + " 个网页在看（点此复制地址）\n" + showmeUrl());
+        browseSync.setTextColor(n > 0 ? ACCENT : fg());
+    }
+
+    private void publishShowme(String p, String title) {
+        io.github.jiemo9527.httpshare.server.ShowMe sm = ShareService.showme;
+        if (sm != null) {
+            sm.publish(prefs.showmeSync() ? p : null, title);
+        }
+    }
+
+    private void browseUp() {
+        if (browseShare < 0) {
+            return;
+        }
+        if (browseRel.isEmpty()) {
+            browseShare = -1;
+        } else {
+            int i = browseRel.lastIndexOf('/');
+            browseRel = i < 0 ? "" : browseRel.substring(0, i);
+        }
+        loadBrowse();
+    }
+
+    private void loadBrowse() {
+        if (browseList == null) {
+            return;
+        }
+        refreshSyncInfo();
+        final List<Prefs.Share> shares = prefs.shares();
+        if (browseShare >= shares.size()) {
+            browseShare = -1;
+            browseRel = "";
+        }
+        browseList.removeAllViews();
+        if (browseShare < 0) {
+            browsePath.setText("全部共享");
+            publishShowme(null, null);
+            if (shares.isEmpty()) {
+                TextView e = text("还没有共享目录，先在「共享」页添加", 13);
+                e.setAlpha(0.6f);
+                e.setPadding(dp(4), dp(16), 0, 0);
+                browseList.addView(e);
+            }
+            for (int i = 0; i < shares.size(); i++) {
+                final int idx = i;
+                Prefs.Share s = shares.get(i);
+                browseList.addView(entryRow("🗂️", s.name, s.path + (s.root ? "  · ROOT" : ""), v -> {
+                    browseShare = idx;
+                    browseRel = "";
+                    loadBrowse();
+                }));
+            }
+            return;
+        }
+        final Prefs.Share sh = shares.get(browseShare);
+        final String abs = joinPath(sh.path, browseRel);
+        final String title = sh.name + (browseRel.isEmpty() ? "" : "/" + browseRel);
+        browsePath.setText(title);
+        publishShowme("/" + browseShare + (browseRel.isEmpty() ? "" : "/" + browseRel), title);
+        TextView loading = text("加载中…", 13);
+        loading.setAlpha(0.6f);
+        loading.setPadding(dp(4), dp(16), 0, 0);
+        browseList.addView(loading);
+        final int token = ++browseToken;
+        new Thread(() -> {
+            List<io.github.jiemo9527.httpshare.server.FileBackend.Entry> list = null;
+            String err = null;
+            try {
+                list = listDir(abs, sh.root);
+            } catch (Exception e) {
+                err = e.getMessage();
+            }
+            final List<io.github.jiemo9527.httpshare.server.FileBackend.Entry> fl = list;
+            final String fe = err;
+            runOnUiThread(() -> {
+                if (token != browseToken) {
+                    return;
+                }
+                browseList.removeAllViews();
+                if (fe != null) {
+                    TextView e = text("读取失败：" + fe, 13);
+                    e.setTextColor(RED);
+                    e.setPadding(dp(4), dp(16), 0, 0);
+                    browseList.addView(e);
+                    return;
+                }
+                if (fl.isEmpty()) {
+                    TextView e = text("空目录", 13);
+                    e.setAlpha(0.6f);
+                    e.setPadding(dp(4), dp(16), 0, 0);
+                    browseList.addView(e);
+                }
+                int shown = 0;
+                for (io.github.jiemo9527.httpshare.server.FileBackend.Entry e : fl) {
+                    if (++shown > 1000) {
+                        TextView more = text("…共 " + fl.size() + " 项，仅显示前 1000 项（网页端显示全部）", 12);
+                        more.setAlpha(0.6f);
+                        browseList.addView(more);
+                        break;
+                    }
+                    String sub = e.dir ? time(e.mtime) : size(e.size) + " · " + time(e.mtime);
+                    View.OnClickListener click = e.dir ? v -> {
+                        browseRel = browseRel.isEmpty() ? e.name : browseRel + "/" + e.name;
+                        loadBrowse();
+                    } : null;
+                    browseList.addView(entryRow(e.dir ? "📁" : fileIcon(e.name), e.name, sub, click));
+                }
+                if (browseScroll != null) {
+                    browseScroll.scrollTo(0, 0);
+                }
+            });
+        }).start();
+    }
+
+    /** 后台线程：按共享类型列目录，目录在前、名称自然排序 */
+    private static List<io.github.jiemo9527.httpshare.server.FileBackend.Entry> listDir(String abs, boolean root)
+            throws Exception {
+        io.github.jiemo9527.httpshare.server.FileBackend fs = root
+                ? new RootBackend() : new io.github.jiemo9527.httpshare.server.LocalBackend();
+        List<io.github.jiemo9527.httpshare.server.FileBackend.Entry> l = fs.list(abs);
+        final java.text.Collator col = java.text.Collator.getInstance(java.util.Locale.CHINA);
+        java.util.Collections.sort(l, (a, b) -> a.dir != b.dir ? (a.dir ? -1 : 1) : col.compare(a.name, b.name));
+        return l;
+    }
+
+    private static String joinPath(String base, String rel) {
+        if (rel.isEmpty()) {
+            return base;
+        }
+        return base.endsWith("/") ? base + rel : base + "/" + rel;
+    }
+
+    private View entryRow(String icon, String name, String sub, View.OnClickListener click) {
+        LinearLayout row = horizontal();
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(dp(4), dp(9), dp(4), dp(9));
+        TextView ic = text(icon, 20);
+        ic.setPadding(0, 0, dp(10), 0);
+        row.addView(ic);
+        LinearLayout col = vertical();
+        TextView n = text(name, 15);
+        col.addView(n);
+        if (sub != null && !sub.isEmpty()) {
+            TextView s2 = text(sub, 11);
+            s2.setAlpha(0.6f);
+            col.addView(s2);
+        }
+        row.addView(col, new LinearLayout.LayoutParams(0, -2, 1));
+        if (click != null) {
+            row.setOnClickListener(click);
+            TextView arrow = text("›", 18);
+            arrow.setAlpha(0.4f);
+            row.addView(arrow);
+        }
+        return row;
+    }
+
+    private static String size(long n) {
+        if (n < 1024) {
+            return n + " B";
+        }
+        String[] u = {"KB", "MB", "GB", "TB"};
+        double d = n;
+        int i = -1;
+        do {
+            d /= 1024;
+            i++;
+        } while (d >= 1024 && i < 3);
+        return String.format(java.util.Locale.ROOT, d < 10 ? "%.2f %s" : "%.1f %s", d, u[i]);
+    }
+
+    private static String time(long t) {
+        return t <= 0 ? "" : new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.ROOT).format(new java.util.Date(t));
+    }
+
+    private static String fileIcon(String n) {
+        int d = n.lastIndexOf('.');
+        String x = d < 0 ? "" : n.substring(d + 1).toLowerCase(java.util.Locale.ROOT);
+        if (x.matches("jpe?g|png|gif|webp|bmp|heic|svg")) return "🖼️";
+        if (x.matches("mp4|mkv|webm|mov|3gp|avi")) return "🎬";
+        if (x.matches("mp3|m4a|flac|wav|ogg|aac|opus|amr")) return "🎵";
+        if (x.matches("zip|rar|7z|tar|gz|xz")) return "🗜️";
+        if (x.equals("apk")) return "📦";
+        if (x.matches("txt|log|md|json|xml|prop|conf|ini")) return "📄";
+        return "📃";
+    }
+
+    // ================================================================== 路径选择器
+
+    interface PathCallback {
+        void onPicked(String path);
+    }
+
+    /** 简易文件管理器：逐级进入目录，选中当前目录。root=true 时通过 su 列目录，可进入 /data 等 */
+    private void pickDir(String start, boolean root, PathCallback cb) {
+        final String[] cur = {start != null && start.startsWith("/")
+                ? start : Environment.getExternalStorageDirectory().getAbsolutePath()};
+        LinearLayout box = vertical();
+        box.setPadding(dp(16), dp(4), dp(16), 0);
+        TextView pathView = text("", 13);
+        pathView.setTypeface(Typeface.MONOSPACE);
+        pathView.setTextColor(ACCENT);
+        pathView.setPadding(0, 0, 0, dp(6));
+        box.addView(pathView);
+
+        HorizontalScrollView hs = new HorizontalScrollView(this);
+        hs.setHorizontalScrollBarEnabled(false);
+        LinearLayout quick = horizontal();
+        String sd = Environment.getExternalStorageDirectory().getAbsolutePath();
+        String[][] qs = root
+                ? new String[][]{{"/", "/"}, {"/data", "/data"}, {"/system", "/system"}, {"内部存储", sd}, {"/vendor", "/vendor"}}
+                : new String[][]{{"内部存储", sd}, {"DCIM", sd + "/DCIM"}, {"Download", sd + "/Download"}, {"Pictures", sd + "/Pictures"}};
+        hs.addView(quick);
+        box.addView(hs);
+
+        LinearLayout list = vertical();
+        ScrollView sv = new ScrollView(this);
+        sv.addView(list);
+        box.addView(sv, new LinearLayout.LayoutParams(-1, (int) (getResources().getDisplayMetrics().heightPixels * 0.45f)));
+        TextView mode = text(root ? "ROOT 模式：可进入系统目录" : "普通模式：只能进入本应用有权限的目录", 11);
+        mode.setAlpha(0.6f);
+        mode.setPadding(0, dp(6), 0, 0);
+        box.addView(mode);
+
+        AlertDialog dlg = new AlertDialog.Builder(this)
+                .setTitle("选择目录")
+                .setView(box)
+                .setPositiveButton("选择此目录", (d, w) -> cb.onPicked(cur[0]))
+                .setNeutralButton("上一级", null)
+                .setNegativeButton("取消", null)
+                .create();
+
+        final int[] tok = {0};
+        final Runnable[] load = new Runnable[1];
+        load[0] = () -> {
+            pathView.setText(cur[0]);
+            list.removeAllViews();
+            TextView l = text("加载中…", 13);
+            l.setAlpha(0.6f);
+            list.addView(l);
+            final String dir = cur[0];
+            final int t = ++tok[0];
+            new Thread(() -> {
+                List<io.github.jiemo9527.httpshare.server.FileBackend.Entry> es = null;
+                String err = null;
+                try {
+                    es = listDir(dir, root);
+                } catch (Exception e) {
+                    err = e.getMessage();
+                }
+                final List<io.github.jiemo9527.httpshare.server.FileBackend.Entry> fes = es;
+                final String fe = err;
+                runOnUiThread(() -> {
+                    if (t != tok[0]) {
+                        return;
+                    }
+                    list.removeAllViews();
+                    if (fe != null) {
+                        TextView e = text("无法读取：" + fe + (root ? "" : "\n可开启「使用 ROOT 访问」后再浏览"), 13);
+                        e.setTextColor(RED);
+                        list.addView(e);
+                        return;
+                    }
+                    int dirs = 0;
+                    for (io.github.jiemo9527.httpshare.server.FileBackend.Entry e : fes) {
+                        if (!e.dir) {
+                            continue;
+                        }
+                        dirs++;
+                        list.addView(entryRow("📁", e.name, null, v -> {
+                            cur[0] = joinPath(dir, e.name);
+                            load[0].run();
+                        }));
+                    }
+                    int files = fes.size() - dirs;
+                    TextView info = text(dirs == 0 ? "（没有子目录" + (files > 0 ? "，含 " + files + " 个文件）" : "）")
+                            : (files > 0 ? "另有 " + files + " 个文件" : ""), 12);
+                    info.setAlpha(0.5f);
+                    info.setPadding(dp(4), dp(8), 0, 0);
+                    list.addView(info);
+                    sv.scrollTo(0, 0);
+                });
+            }).start();
+        };
+        for (String[] q : qs) {
+            TextView chip = text(q[0], 13);
+            chip.setPadding(dp(10), dp(5), dp(10), dp(5));
+            chip.setBackground(outline(0x88888888));
+            chip.setOnClickListener(v -> {
+                cur[0] = q[1];
+                load[0].run();
+            });
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(-2, -2);
+            lp.setMarginEnd(dp(6));
+            lp.bottomMargin = dp(6);
+            quick.addView(chip, lp);
+        }
+        dlg.setOnShowListener(d -> dlg.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+            String c = cur[0];
+            if (c.equals("/")) {
+                return;
+            }
+            int i = c.lastIndexOf('/');
+            cur[0] = i <= 0 ? "/" : c.substring(0, i);
+            load[0].run();
+        }));
+        dlg.show();
+        load[0].run();
     }
 
     // ================================================================== 日志页
@@ -423,7 +925,8 @@ public class MainActivity extends Activity {
             return;
         }
         List<String> l = ShareService.logs();
-        logView.setText(l.isEmpty() ? "暂无日志（仅保存在内存中，最多 300 条）" : String.join("\n", l));
+        logView.setText(l.isEmpty() ? "暂无日志（仅保存在内存中，最多 " + ShareService.MAX_LOG + " 行）"
+                : String.join("\n", l));
     }
 
     // ================================================================== 设置页
@@ -457,10 +960,25 @@ public class MainActivity extends Activity {
         portRow.addView(portVal);
         page.addView(portRow);
 
-        Switch write = sw("允许上传 / 新建 / 改名 / 删除", prefs.allowWrite());
-        write.setOnCheckedChangeListener((b, c) -> prefs.setAllowWrite(c));
-        page.addView(write);
-        hint(page, "关闭时网页端只读。即时生效。");
+        section(page, "网页端权限");
+        Switch up = sw("允许上传 / 新建文件夹", prefs.allowUpload());
+        up.setOnCheckedChangeListener((b, c) -> prefs.setAllowUpload(c));
+        page.addView(up);
+        Switch mod = sw("允许改名 / 删除（含覆盖同名文件）", prefs.allowModify());
+        mod.setOnCheckedChangeListener((b, c) -> prefs.setAllowModify(c));
+        page.addView(mod);
+        hint(page, "两项都关闭时网页端只读（仍可浏览、下载）。即时生效，无需重启服务。");
+
+        section(page, "同步查阅");
+        Switch smSw = sw("在「浏览」页打开目录时同步到 /showme", prefs.showmeSync());
+        smSw.setOnCheckedChangeListener((b, c) -> {
+            prefs.setShowmeSync(c);
+            if (!c) {
+                publishShowme(null, null);
+            }
+        });
+        page.addView(smSw);
+        hint(page, "网页打开 http(s)://地址/showme ，会实时显示你在 App「浏览」页打开的目录（需登录，只读）。离开浏览页后网页显示等待状态。");
 
         section(page, "加密");
         LinearLayout pwRow = horizontal();
@@ -471,7 +989,8 @@ public class MainActivity extends Activity {
         pwBtn.setOnClickListener(v -> editPassword());
         pwRow.addView(pwBtn);
         page.addView(pwRow);
-        hint(page, "访问网页或文件前需输入密码；只保存加盐哈希。错误 8 次锁定该 IP 5 分钟。"
+        hint(page, "访问网页或文件前需输入密码；只保存加盐哈希。同一 IP 连续输错 3 次封锁 2 小时，"
+                + "重启服务即可解除全部封锁（外网访问按真实访客 IP 计）。"
                 + "curl/wget 可用 HTTP Basic：curl -u x:密码 URL。即时生效。");
 
         Switch https = sw("HTTPS 加密传输（自签名证书）", prefs.https());
@@ -493,60 +1012,21 @@ public class MainActivity extends Activity {
         page.addView(fp);
 
         section(page, "外网访问");
-        String[] modes = {"关闭（仅局域网）", "自动：有公网 IPv4 直连，否则 Cloudflare 隧道", "总是使用 Cloudflare 隧道"};
-        LinearLayout modeBox = vertical();
-        android.widget.RadioGroup rg = new android.widget.RadioGroup(this);
-        for (int i = 0; i < modes.length; i++) {
-            android.widget.RadioButton rb = new android.widget.RadioButton(this);
-            rb.setId(1000 + i);
-            rb.setText(modes[i]);
-            rb.setTextColor(fg());
-            rb.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-            rb.setPadding(0, dp(4), 0, dp(4));
-            rg.addView(rb);
-        }
-        rg.check(1000 + prefs.remoteMode());
-        rg.setOnCheckedChangeListener((g, id) -> {
-            int m = id - 1000;
-            if (m != 0 && !prefs.hasPassword()) {
-                toast("开启外网访问前请先设置访问密码");
-            }
-            if (m != 0 && !Remote.binaryAvailable(ShareService.tunnelBinary(this))) {
-                toast("本机架构不支持隧道，只能公网 IPv4 直连");
-            }
-            prefs.setRemoteMode(m);
-            restartHint();
-        });
-        modeBox.addView(rg);
-        page.addView(modeBox);
-        hint(page, "Cloudflare 临时隧道：手机主动连出，无需公网 IP，流量/移动网络也能用；地址形如 xxx.trycloudflare.com，每次启动会变，"
-                + "单文件上传上限约 100 MB，速度取决于到 Cloudflare 的线路。为防止被扫描，外网访问强制要求设置访问密码。修改后需重启服务。");
+        hint(page, "网络方式在「共享」页启动按钮上方切换。Cloudflare 临时隧道：手机主动连出，无需公网 IP，流量下也能用；"
+                + "地址形如 xxx.trycloudflare.com，每次启动会变，单文件上传上限约 100 MB。外网访问强制要求设置访问密码。"
+                + "如手机装了 box/mihomo 等透明代理，需让本应用绕过代理。");
 
         section(page, "桌面图标");
-        Switch auto = sw("模块生效时自动隐藏桌面图标", prefs.autoHideIcon());
-        auto.setOnCheckedChangeListener((b, c) -> {
-            prefs.setAutoHideIcon(c);
-            if (c) {
-                autoHideIcon();
-            }
-        });
-        page.addView(auto);
         hideIconSwitch = sw("隐藏桌面图标", isIconHidden());
         hideIconSwitch.setOnCheckedChangeListener((b, checked) -> {
             if (checked == isIconHidden()) {
                 return;
             }
             setIconHidden(checked);
-            if (!checked) {
-                // 手动恢复后不再自动隐藏，否则下次打开又会被隐藏
-                prefs.setAutoHideIcon(false);
-                auto.setChecked(false);
-            }
             toast(checked ? "已隐藏，可从 LSPosed 管理器打开" : "已恢复桌面图标");
         });
         page.addView(hideIconSwitch);
-        hint(page, "隐藏后打开方式：LSPosed 管理器 → 模块 → HTTP 共享 → 设置按钮，或点通知栏。"
-                + "作用域勾选「系统框架」可避免部分桌面生成“应用详情”替身图标（需重启）。");
+        hint(page, "手动开关，默认不隐藏。隐藏后打开方式：LSPosed 管理器 → 模块 → HTTP 共享，或点通知栏。");
 
         section(page, "关于");
         hint(page, "项目源码、版本说明与问题反馈：");
@@ -668,6 +1148,7 @@ public class MainActivity extends Activity {
         permView.setText("⚠ 未授予“所有文件访问”权限，非 ROOT 共享可能无法读取内部存储。点此授权");
 
         refreshShares();
+        refreshModeChips();
         if (passwordState != null) {
             passwordState.setText(prefs.hasPassword() ? "访问密码：已设置" : "访问密码：未设置");
         }
@@ -713,12 +1194,17 @@ public class MainActivity extends Activity {
 
     // ================================================================== 图标
 
-    private void autoHideIcon() {
-        if (prefs.autoHideIcon() && ModuleStatus.isActive() && !isIconHidden()) {
-            setIconHidden(true);
-            toast("模块已生效，已自动隐藏桌面图标（可在设置中恢复）");
+    /** 0.2 及以前版本会自动隐藏图标；升级后恢复一次，之后只由用户手动控制 */
+    private void restoreIconOnce() {
+        android.content.SharedPreferences sp = getSharedPreferences("config", MODE_PRIVATE);
+        if (sp.getBoolean("icon_migrated", false)) {
+            return;
+        }
+        sp.edit().putBoolean("icon_migrated", true).remove("auto_hide").apply();
+        if (isIconHidden()) {
+            setIconHidden(false);
             if (hideIconSwitch != null) {
-                hideIconSwitch.setChecked(true);
+                hideIconSwitch.setChecked(false);
             }
         }
     }
