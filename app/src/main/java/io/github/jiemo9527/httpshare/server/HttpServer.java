@@ -1080,15 +1080,15 @@ public final class HttpServer {
         String unc = "\\\\" + h + (http ? "" : "@SSL") + (port != null ? "@" + port : "") + "\\dav";
         String note;
         if (tunnel) {
-            note = "echo  提示：这是 Cloudflare 临时隧道地址，手机上的服务重启后地址会变，本盘符随之失效，届时请在网页上重新下载脚本。\r\n";
+            note = "提示：这是 Cloudflare 临时隧道地址，手机上的服务重启后地址会变，本盘符随之失效，届时请在网页上重新下载脚本。";
         } else if (ssl != null) {
-            note = "echo  提示：HTTPS 使用自签名证书，Windows 不信任时无法挂载，可改用 Cloudflare 隧道地址或关闭 App 的 HTTPS。\r\n";
+            note = "";
         } else {
-            note = "echo  提示：已设为开机自动重连（重连时 Windows 可能再次询问密码）；手机 IP 或端口变化后请重新下载运行脚本。\r\n";
+            note = "提示：已设为开机自动重连（重连时 Windows 可能再次询问密码）；手机 IP 或端口变化后请重新下载运行脚本。";
         }
         String bat = new String(config.mountBat(), StandardCharsets.UTF_8)
                 .replace("{URL}", url)
-                .replace("{NEED_BASIC}", http ? "1" : "0")
+                .replace("{NEED_BASIC}", http ? "$true" : "$false")
                 .replace("{UNC}", unc)
                 .replace("{PERSIST}", tunnel ? "no" : "yes")
                 .replace("{NOTE}", note)

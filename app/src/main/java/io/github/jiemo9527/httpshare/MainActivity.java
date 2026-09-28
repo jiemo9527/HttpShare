@@ -96,6 +96,7 @@ public class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = new Prefs(this);
+        ShareService.initLog(this);
         getWindow().setStatusBarColor(Color.TRANSPARENT);
         buildUi();
         restoreIconOnce();
@@ -801,10 +802,14 @@ public class MainActivity extends Activity {
         LinearLayout bar = horizontal();
         bar.setGravity(Gravity.END);
         TextView clear = button("清空", ACCENT, false);
-        clear.setOnClickListener(v -> {
-            ShareService.clearLogs();
-            refreshLog();
-        });
+        clear.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setMessage("清空全部日志？（日志保存在本机，最多保留最新 " + ShareService.MAX_LOG + " 行，不会自动清空）")
+                .setPositiveButton("清空", (d, w) -> {
+                    ShareService.clearLogs();
+                    refreshLog();
+                })
+                .setNegativeButton("取消", null)
+                .show());
         bar.addView(clear);
         page.addView(bar);
         logView = text("", 12);
@@ -820,7 +825,7 @@ public class MainActivity extends Activity {
             return;
         }
         List<String> l = ShareService.logs();
-        logView.setText(l.isEmpty() ? "暂无日志（仅保存在内存中，最多 " + ShareService.MAX_LOG + " 行）"
+        logView.setText(l.isEmpty() ? "暂无日志（保存在本机，最多保留最新 " + ShareService.MAX_LOG + " 行，不会自动清空）"
                 : String.join("\n", l));
     }
 

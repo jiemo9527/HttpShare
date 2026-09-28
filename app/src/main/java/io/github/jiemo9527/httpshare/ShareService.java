@@ -55,12 +55,105 @@ public class ShareService extends Service {
     private WifiManager.WifiLock wifi;
     private final Handler main = new Handler(Looper.getMainLooper());
 
+    /**
+     * 日志持久化到 files/log.txt（最早的在前，每行一条）：App 被杀、服务重启、手机重启后都保留；
+     * 超过 MAX_LOG 行时只丢弃最早的，除非用户点「清空」不会主动清除。
+     */
+    private static java.io.File logFile;
+    private static boolean logLoaded;
+    private static int logAppends;
+    private static final java.util.concurrent.ExecutorService LOG_IO =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "HttpShare-log");
+                t.setDaemon(true);
+                return t;
+            });
+
+    /** Application/Activity/Service 启动时调用一次 */
+    public static void initLog(android.content.Context c) {
+        synchronized (LOG) {
+            if (logFile != null) {
+                return;
+            }
+            logFile = new java.io.File(c.getApplicationContext().getFilesDir(), "log.txt");
+        }
+        LOG_IO.execute(ShareService::loadLog);
+    }
+
+    private static void loadLog() {
+        List<String> old = new ArrayList<>();
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new java.io.InputStreamReader(
+                new java.io.FileInputStream(logFile), java.nio.charset.StandardCharsets.UTF_8))) {
+            String l;
+            while ((l = r.readLine()) != null) {
+                if (!l.isEmpty()) {
+                    old.add(l);
+                }
+            }
+        } catch (java.io.IOException ignored) {
+        }
+        synchronized (LOG) {
+            // 文件里最早的在前；内存里最新的在前，且可能已有本次启动后新写的几行（它们比文件里的都新）
+            for (int i = old.size() - 1; i >= 0; i--) {
+                LOG.add(old.get(i));
+            }
+            while (LOG.size() > MAX_LOG) {
+                LOG.removeLast();
+            }
+            logLoaded = true;
+            if (old.size() > MAX_LOG + 500) {
+                rewriteLogLocked();
+            }
+        }
+        notifyChange();
+    }
+
+    /** 调用方持有 LOG 锁 */
+    private static void rewriteLogLocked() {
+        if (logFile == null) {
+            return;
+        }
+        final List<String> snap = new ArrayList<>(LOG);
+        LOG_IO.execute(() -> {
+            java.io.File tmp = new java.io.File(logFile.getPath() + ".tmp");
+            try (java.io.Writer w = new java.io.OutputStreamWriter(new java.io.FileOutputStream(tmp),
+                    java.nio.charset.StandardCharsets.UTF_8)) {
+                for (int i = snap.size() - 1; i >= 0; i--) {
+                    w.write(snap.get(i));
+                    w.write('\n');
+                }
+            } catch (java.io.IOException e) {
+                tmp.delete();
+                return;
+            }
+            tmp.renameTo(logFile);
+        });
+    }
+
     public static void log(String s) {
-        String line = new SimpleDateFormat("HH:mm:ss", Locale.ROOT).format(new Date()) + "  " + s;
+        String line = new SimpleDateFormat("MM-dd HH:mm:ss", Locale.ROOT).format(new Date()) + "  "
+                + s.replace('\n', ' ').replace('\r', ' ');
         synchronized (LOG) {
             LOG.addFirst(line);
             while (LOG.size() > MAX_LOG) {
                 LOG.removeLast();
+            }
+            if (logFile != null) {
+                // 追加写入；文件超过上限较多时整体重写一次，只保留最新 MAX_LOG 行
+                if (logLoaded && ++logAppends >= 500) {
+                    logAppends = 0;
+                    rewriteLogLocked();
+                } else {
+                    final java.io.File f = logFile;
+                    LOG_IO.execute(() -> {
+                        try (java.io.Writer w = new java.io.OutputStreamWriter(new java.io.FileOutputStream(f, true),
+                                java.nio.charset.StandardCharsets.UTF_8)) {
+                            w.write(line);
+                            w.write('\n');
+                        } catch (java.io.IOException ignored) {
+                        }
+                    });
+                }
             }
         }
         notifyChange();
@@ -72,9 +165,12 @@ public class ShareService extends Service {
         }
     }
 
+    /** 仅在用户点「清空」时调用 */
     public static void clearLogs() {
         synchronized (LOG) {
             LOG.clear();
+            logAppends = 0;
+            rewriteLogLocked();
         }
         notifyChange();
     }
@@ -125,6 +221,7 @@ public class ShareService extends Service {
         if (server != null) {
             return START_NOT_STICKY;
         }
+        initLog(this);
         final Prefs prefs = new Prefs(this);
         final byte[] page = readAsset("web.html");
         final byte[] showmePage = readAsset("showme.html");

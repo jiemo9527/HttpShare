@@ -77,18 +77,30 @@ class StaticTest(unittest.TestCase):
     def test_windows_mount_script(self):
         srv = read(JAVA / "server/HttpServer.java")
         self.assertIn('case "/api/mount.bat":', srv)
-        # Host header goes into a .bat: must be validated
+        # Host header goes into the script: must be validated
         self.assertIn("SAFE_HOST.matcher(host).matches()", srv)
-        bat = read(MAIN / "assets/mount.bat")
+        raw = (MAIN / "assets/mount.bat").read_bytes()
+        marker = raw.rindex(b"##PS-BEGIN")
+        # cmd.exe mis-parses multi-byte lines: the batch part must be pure ASCII
+        self.assertTrue(all(b < 128 for b in raw[:marker]))
+        self.assertIn(b"LastIndexOf", raw[:marker])
+        bat = raw.decode("utf-8")
         for ph in ("{URL}", "{NEED_BASIC}", "{UNC}", "{PERSIST}", "{NOTE}"):
             self.assertIn(ph, bat)
-        # password is typed at runtime, never embedded
-        self.assertIn('"%DAV_URL%" * /user:', bat)
-        # quoting inside for /f command must stay unquoted (^ is literal inside quotes)
-        self.assertIn("('%SYS%\\reg.exe query %KEY%", bat)
+        self.assertIn("-AsSecureString", bat)        # password typed at runtime, never embedded
+        self.assertIn("TrustFailure", bat)           # self-signed HTTPS explained, not a wrong password
         self.assertIn("-Verb RunAs", bat)
         # repeated wrong password from auto-retrying clients counts once
         self.assertIn("f[2] == digest", srv)
+
+    def test_log_persisted(self):
+        svc = read(JAVA / "ShareService.java")
+        self.assertIn('"log.txt"', svc)
+        self.assertRegex(svc, r"MAX_LOG\s*=\s*3000\b")
+        # only the explicit clear button empties the log
+        main = read(JAVA / "MainActivity.java")
+        self.assertEqual(main.count("ShareService.clearLogs()"), 1)
+        self.assertEqual(svc.count("LOG.clear()"), 1)
 
     def test_xposed_entry(self):
         self.assertEqual(read(MAIN / "assets/xposed_init").strip(),
