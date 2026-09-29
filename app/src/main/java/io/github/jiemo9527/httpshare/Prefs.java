@@ -124,7 +124,8 @@ public final class Prefs {
     }
 
     public boolean https() {
-        return sp.getBoolean("https", false);
+        // 默认开启：本地根证书只能签内网 IP，挂载脚本会核对指纹后安装，局域网 HTTPS 可直接用
+        return sp.getBoolean("https", true);
     }
 
     public void setHttps(boolean b) {

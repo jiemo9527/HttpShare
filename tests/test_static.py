@@ -104,6 +104,7 @@ class StaticTest(unittest.TestCase):
         self.assertIn("ext(new int[]{2, 5, 29, 17}, true", tls)   # SAN critical, empty subject
         svc = read(JAVA / "ShareService.java")
         self.assertIn("Tls.context(getFilesDir(), allAddresses())", svc)
+        self.assertIn('sp.getBoolean("https", true)', read(JAVA / "Prefs.java"))
 
     def test_log_persisted(self):
         svc = read(JAVA / "ShareService.java")
