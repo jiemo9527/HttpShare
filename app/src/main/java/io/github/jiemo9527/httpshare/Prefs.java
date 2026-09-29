@@ -300,7 +300,7 @@ public final class Prefs {
 
     // ---------------------------------------------------------------- 外网
 
-    /** Remote.MODE_OFF / MODE_AUTO(公网 IPv4 优先，否则 Cloudflare) / MODE_TUNNEL(总是 Cloudflare) */
+    /** Remote.MODE_OFF / MODE_AUTO(检测公网 IPv4后仍以安全的 Cloudflare 网页隧道为准) / MODE_TUNNEL(总是 Cloudflare) */
     public int remoteMode() {
         return sp.getInt("remote", 0);
     }
@@ -322,12 +322,30 @@ public final class Prefs {
 
     // ---------------------------------------------------------------- WebDAV
 
-    /** 在 /dav/ 提供 WebDAV（可挂载为网络盘），权限与网页端相同 */
-    public boolean webdav() {
-        return sp.getBoolean("webdav", true);
+    public static final String FILE_OFF = "off";
+    public static final String FILE_DAV = "dav";
+    public static final String FILE_FTP = "ftp";
+
+    /** 文件服务（与网页端并存，二者互斥）：关闭 / WebDAV（/dav/）/ FTP（2121） */
+    public String fileService() {
+        String v = sp.getString("file_service", null);
+        if (v == null) {
+            // 旧版本只有 WebDAV 开关
+            return sp.getBoolean("webdav", true) ? FILE_DAV : FILE_OFF;
+        }
+        return v;
     }
 
-    public void setWebdav(boolean b) {
-        sp.edit().putBoolean("webdav", b).apply();
+    public void setFileService(String v) {
+        sp.edit().putString("file_service", v).apply();
+    }
+
+    /** 在 /dav/ 提供 WebDAV（可挂载为网络盘），权限与网页端相同 */
+    public boolean webdav() {
+        return FILE_DAV.equals(fileService());
+    }
+
+    public boolean ftp() {
+        return FILE_FTP.equals(fileService());
     }
 }

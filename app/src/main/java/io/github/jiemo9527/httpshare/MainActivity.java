@@ -56,6 +56,7 @@ public class MainActivity extends Activity {
     private final View[] pages = new View[TAB_COUNT];
     private final TextView[] tabs = new TextView[TAB_COUNT];
     private final TextView[] modeChips = new TextView[3];
+    private final TextView[] fileChips = new TextView[3];
 
     // 浏览页（同步查阅）
     private int browseShare = 0;
@@ -257,7 +258,7 @@ public class MainActivity extends Activity {
             modes.addView(c, lp);
         }
         card.addView(modes);
-        TextView mh = text("自动：有公网 IPv4 直连，否则走 Cloudflare 隧道；外网需先设访问密码。运行中切换会自动重启服务。", 11);
+        TextView mh = text("自动：检测公网 IPv4；网页仍走 Cloudflare 隧道（本地证书不适用于公网 IP）。外网需先设访问密码。运行中切换会自动重启服务。", 11);
         mh.setAlpha(0.6f);
         mh.setPadding(0, dp(4), 0, 0);
         card.addView(mh);
@@ -394,7 +395,7 @@ public class MainActivity extends Activity {
             return;
         }
         if (m != Remote.MODE_OFF && !Remote.binaryAvailable(ShareService.tunnelBinary(this))) {
-            toast("本机架构不支持 Cloudflare 隧道，只能公网 IPv4 直连");
+            toast("本机架构不支持 Cloudflare 隧道；本地证书不支持安全的公网 IPv4 直连");
         }
         prefs.setRemoteMode(m);
         refreshModeChips();
@@ -407,6 +408,49 @@ public class MainActivity extends Activity {
                 startForegroundService(i);
                 ui.postDelayed(this::refresh, 600);
             }, 700);
+        }
+    }
+
+    private void setFileService(String v) {
+        if (v.equals(prefs.fileService())) {
+            return;
+        }
+        prefs.setFileService(v);
+        refreshFileChips();
+        if (ShareService.running) {
+            Intent i = new Intent(this, ShareService.class);
+            stopService(i);
+            toast("正在重启服务…");
+            ui.postDelayed(() -> {
+                ShareService.error = null;
+                startForegroundService(i);
+                ui.postDelayed(this::refresh, 800);
+            }, 700);
+        } else {
+            refresh();
+        }
+    }
+
+    private void refreshFileChips() {
+        String cur = prefs.fileService();
+        String[] vals = {Prefs.FILE_OFF, Prefs.FILE_DAV, Prefs.FILE_FTP};
+        for (int i = 0; i < 3; i++) {
+            TextView c = fileChips[i];
+            if (c == null) {
+                continue;
+            }
+            GradientDrawable g = new GradientDrawable();
+            g.setCornerRadius(dp(8));
+            if (vals[i].equals(cur)) {
+                g.setColor(ACCENT);
+                c.setTextColor(Color.WHITE);
+                c.setTypeface(Typeface.DEFAULT_BOLD);
+            } else {
+                g.setStroke(dp(1), 0x88888888);
+                c.setTextColor(fg());
+                c.setTypeface(Typeface.DEFAULT);
+            }
+            c.setBackground(g);
         }
     }
 
@@ -880,18 +924,33 @@ public class MainActivity extends Activity {
         page.addView(smSw);
         hint(page, "网页打开 http(s)://地址/showme ，会实时显示你在 App「浏览」页打开的目录（需登录，只读）。离开浏览页后网页显示等待状态。");
 
-        section(page, "WebDAV（挂载为网络盘）");
-        Switch davSw = sw("开启 WebDAV（地址 /dav/）", prefs.webdav());
-        davSw.setOnCheckedChangeListener((b, c) -> {
-            prefs.setWebdav(c);
-            refresh();
-        });
-        page.addView(davSw);
-        hint(page, "在电脑/手机文件管理器里把手机挂成网络盘，直接打开、编辑、保存文件，改动实时写回手机。"
-                + "用户名任意，密码为访问密码；读写权限与网页端相同。即时生效。\n"
-                + "· Windows：网页上点「挂载为网络盘」→ 下载一键挂载脚本，双击运行、输入密码即可（首次会弹一次管理员确认，自动修改 WebDAV 设置）。\n"
-                + "· macOS：Finder → 前往 → 连接服务器。\n"
-                + "· 安卓/iOS：支持 WebDAV 的文件管理器（如 MT 管理器、Solid Explorer、Documents）。");
+        section(page, "文件服务（二选一）");
+        LinearLayout fsRow = horizontal();
+        String[] fsName = {"关闭", "WebDAV", "FTP"};
+        String[] fsVal = {Prefs.FILE_OFF, Prefs.FILE_DAV, Prefs.FILE_FTP};
+        for (int i = 0; i < 3; i++) {
+            final String v = fsVal[i];
+            TextView c = text(fsName[i], 14);
+            c.setGravity(Gravity.CENTER);
+            c.setPadding(dp(4), dp(8), dp(4), dp(8));
+            c.setOnClickListener(x -> setFileService(v));
+            fileChips[i] = c;
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, -2, 1);
+            if (i > 0) {
+                lp.setMarginStart(dp(6));
+            }
+            fsRow.addView(c, lp);
+        }
+        page.addView(fsRow);
+        refreshFileChips();
+        hint(page, "网页端始终可用；WebDAV 与 FTP 同时只能开一个。用户名任意，密码为访问密码，读写权限与网页端相同。\n"
+                + "· WebDAV（地址 /dav/）：挂载为网络盘，直接打开、编辑、保存。与网页同端口，局域网和 CF 隧道都能用。"
+                + "Windows 在网页上点「挂载为网络盘」下载一键脚本；macOS 用 Finder「连接服务器」；手机用 MT 管理器、Solid Explorer 等。\n"
+                + "· FTP（端口 " + io.github.jiemo9527.httpshare.server.FtpServer.PORT + "，被动端口 "
+                + io.github.jiemo9527.httpshare.server.FtpServer.PASV_FROM + "-" + io.github.jiemo9527.httpshare.server.FtpServer.PASV_TO
+                + "）：普通明文 FTP，可用 Windows 文件资源管理器、FileZilla、WinSCP、MT 管理器。"
+                + "密码和文件内容均未加密，请只在受信任局域网使用。支持断点续传下载；不支持 CF 隧道或公网访问。\n"
+                + "切换后若服务正在运行会自动重启。");
 
         section(page, "加密");
         LinearLayout pwRow = horizontal();
@@ -1131,6 +1190,10 @@ public class MainActivity extends Activity {
             }
             TextView tip = text("点击地址复制；同一局域网的电脑/手机浏览器打开即可。"
                     + (prefs.webdav() ? "WebDAV：地址后加 /dav/" : "")
+                    + (ShareService.ftpPort > 0 ? "\nFTP（明文，仅限受信任局域网）：ftp://" + (ips.isEmpty() ? "127.0.0.1" : ips.get(0)) + ":" + ShareService.ftpPort
+                        + "，用户名任意，密码为访问密码" : "")
+                    + (prefs.ftp() ? "\n⚠ FTP 的密码和文件内容均未加密；仅限受信任局域网，不支持 CF 隧道。" : "")
+                    + (ShareService.ftpError != null ? "\n⚠ " + ShareService.ftpError : "")
                     + (prefs.hasPassword() ? "" : "\n⚠ 未设置访问密码，同网段任何人都能访问。"), 12);
             tip.setAlpha(0.75f);
             urlBox.addView(tip);
@@ -1168,6 +1231,7 @@ public class MainActivity extends Activity {
 
         refreshShares();
         refreshModeChips();
+        refreshFileChips();
         refreshPassword();
         if (hideIconSwitch != null) {
             hideIconSwitch.setChecked(isIconHidden());

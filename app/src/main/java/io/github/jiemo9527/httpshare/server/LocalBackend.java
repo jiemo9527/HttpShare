@@ -5,6 +5,8 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.file.Files;
+import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -52,11 +54,17 @@ public final class LocalBackend implements FileBackend {
             tmp.delete();
             throw e;
         }
-        File dst = new File(path);
-        dst.delete();
-        if (!tmp.renameTo(dst)) {
+        try {
+            // Never delete an existing destination before its replacement is ready: an interrupted
+            // upload must leave the old file intact.  Files.move performs the replacement as one
+            // filesystem operation when the underlying storage supports it.
+            Files.move(tmp.toPath(), new File(path).toPath(), StandardCopyOption.REPLACE_EXISTING,
+                    StandardCopyOption.ATOMIC_MOVE);
+        } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+            Files.move(tmp.toPath(), new File(path).toPath(), StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
             tmp.delete();
-            throw new IOException("写入失败");
+            throw e;
         }
     }
 

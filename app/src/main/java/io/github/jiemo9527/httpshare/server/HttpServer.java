@@ -148,6 +148,20 @@ public final class HttpServer {
         fails.clear();
     }
 
+    // ---- 供 FtpServer 复用：配置、封锁计数、日志
+
+    Config config() {
+        return config;
+    }
+
+    void loginOk(String ip) {
+        fails.remove(ip);
+    }
+
+    void logLine(String s) {
+        log(s);
+    }
+
     public void start() throws IOException {
         server = ssl != null
                 ? ssl.getServerSocketFactory().createServerSocket()
@@ -435,6 +449,13 @@ public final class HttpServer {
                     "Content-Disposition: attachment; filename=\"HttpShare-CA.cer\"\r\n");
         }
 
+        // In FTP/off mode the Windows WebDAV helper must not be discoverable, even to an
+        // unauthenticated request.  This also keeps the public webpage useful without exposing
+        // an action that cannot work in the selected file-service mode.
+        if (path.equals("/api/mount.bat") && !config.webdav()) {
+            throw new HttpError(404, "WebDAV 未开启");
+        }
+
         boolean isApi = path.startsWith("/api/");
         boolean isFile = path.startsWith("/f/");
         if (!isApi && !isFile) {
@@ -611,7 +632,7 @@ public final class HttpServer {
         }
     }
 
-    private boolean locked(String ip) {
+    boolean locked(String ip) {
         long[] f = fails.get(ip);
         return f != null && f[0] >= MAX_FAILS && System.currentTimeMillis() - f[1] < LOCK_MS;
     }
@@ -622,7 +643,7 @@ public final class HttpServer {
      * 输错一次就会在一秒内发出多个请求，不去重的话用户实际只输错一次就被封锁。
      * 用于判断的是加盐摘要，不在内存里保存错误密码原文。
      */
-    private void fail(String ip, String pw) {
+    void fail(String ip, String pw) {
         long[] f = fails.computeIfAbsent(ip, k -> new long[3]);
         long n;
         long digest = pwDigest(pw);
@@ -707,7 +728,7 @@ public final class HttpServer {
 
     // ================================================================== 路径
 
-    private static final class Target {
+    static final class Target {
         FileBackend fs;
         Share share;
         /** 共享内相对路径，无首尾 / */
@@ -721,7 +742,7 @@ public final class HttpServer {
     }
 
     /** "/序号/a/b" → 绝对路径；拒绝 . 与 .. 段 */
-    private Target resolve(String p) throws Exception {
+    Target resolve(String p) throws Exception {
         List<String> segs = new ArrayList<>();
         for (String s : p.split("/")) {
             if (s.isEmpty()) {

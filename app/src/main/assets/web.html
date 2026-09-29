@@ -105,7 +105,7 @@ input{font:inherit;padding:7px 10px;border-radius:8px;border:1px solid var(--lin
   <div id="davwin">
     <div>Windows：下载脚本后双击运行，按提示输入访问密码，自动映射为盘符并打开。</div>
     <ol><li>首次运行如需修改系统设置（允许 HTTP 登录、单文件上限 4 GB），会弹出一次管理员确认</li>
-    <li>密码只在运行时输入，不写入脚本</li><li id="davssl" class="hidden" style="color:var(--red)">当前是 App 的自签名 HTTPS，Windows 自带网络盘不信任该证书、无法挂载：请在 App 设置里关闭 HTTPS（局域网用 HTTP），或切换到 CF 隧道后用隧道地址打开本页再下载</li><li>手机上修改的文件，已挂载的盘里约 1 分钟后才能看到新内容（Windows 自带客户端固定缓存约 60 秒，无法关闭）；目录和文件大小会立即更新</li><li id="davtun" class="hidden">隧道地址每次启动服务都会变，变了之后重新下载运行即可</li></ol>
+    <li>密码只在运行时输入，不写入脚本</li><li id="davssl" class="hidden" style="color:var(--red)">当前是 App 的本地 HTTPS 证书。下载脚本会核对指纹并将根证书安装到“本地计算机”证书库，然后再挂载；无需关闭 HTTPS</li><li>手机上修改的文件，已挂载的盘里约 1 分钟后才能看到新内容（Windows 自带客户端固定缓存约 60 秒，无法关闭）；目录和文件大小会立即更新</li><li id="davtun" class="hidden">隧道地址每次启动服务都会变，变了之后重新下载运行即可</li></ol>
   </div>
   <div class="mut">其他系统 / 工具手动添加，用户名任意，密码为访问密码：</div>
   <code id="davurl"></code>

@@ -28,8 +28,9 @@ import java.util.Set;
 /**
  * 外网访问：
  * <ul>
- *   <li>本机网卡上有公网 IPv4（且与出口 IP 一致）→ 直接用该地址访问。</li>
- *   <li>否则启动 Cloudflare 临时隧道（trycloudflare.com），手机主动连出去，无需公网 IP。</li>
+ *   <li>自动模式会检测公网 IPv4；本地 CA 的名称约束不适合为公网 IP 提供可验证 TLS，
+ *       所以网页仍启动 Cloudflare 临时隧道，FTP 公网直连也保持关闭。</li>
+ *   <li>Cloudflare 临时隧道（trycloudflare.com）只承载网页 HTTP(S)，手机主动连出去，无需公网 IP。</li>
  * </ul>
  *
  * Android 上 Go 程序（cloudflared）用裸 syscall 建连，不经过 bionic 的 netd 标记，
@@ -83,6 +84,8 @@ public final class Remote {
     }
 
     public void start() {
+        publicV4 = null;
+        ipv6 = new ArrayList<>();
         running = true;
         worker = new Thread(this::loop, "HttpShare-remote");
         worker.setDaemon(true);
@@ -101,6 +104,8 @@ public final class Remote {
         }
         url = null;
         state = "";
+        publicV4 = null;
+        ipv6 = new ArrayList<>();
         notifyState();
     }
 
@@ -116,11 +121,13 @@ public final class Remote {
                     publicV4 = v4;
                     ipv6 = globalV6();
                     if (v4 != null) {
-                        set("公网 IPv4 直连", (https ? "https" : "http") + "://" + v4 + ":" + port);
-                        log("检测到公网 IPv4 " + v4 + "，使用直连（运营商可能封锁部分端口）");
-                        return;
+                        // The bundled CA deliberately constrains its names to private networks.  Do not
+                        // advertise a public-IP TLS endpoint that compliant clients must reject.
+                        log("检测到公网 IPv4 " + v4 + "；网页改用 Cloudflare 隧道，FTP 不支持公网直连");
                     }
-                    log("无公网 IPv4，改用 Cloudflare 隧道");
+                    if (v4 == null) {
+                        log("无公网 IPv4，改用 Cloudflare 隧道");
+                    }
                 } else {
                     ipv6 = globalV6();
                 }

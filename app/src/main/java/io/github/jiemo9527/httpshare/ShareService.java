@@ -48,8 +48,12 @@ public class ShareService extends Service {
     /** 同步查阅：服务运行期间可用；App 浏览页调用 publish */
     public static volatile io.github.jiemo9527.httpshare.server.ShowMe showme;
     public static volatile HttpServer current;
+    /** FTP 端口；0 表示未开启 */
+    public static volatile int ftpPort;
+    public static volatile String ftpError;
 
     private HttpServer server;
+    private io.github.jiemo9527.httpshare.server.FtpServer ftp;
     private Remote remote;
     private PowerManager.WakeLock wake;
     private WifiManager.WifiLock wifi;
@@ -180,6 +184,12 @@ public class ShareService extends Service {
         if (r != null) {
             new Handler(Looper.getMainLooper()).post(r);
         }
+    }
+
+    /** FTP 只接受局域网/回环连接。CF 隧道只转发 HTTP，FTP 不提供公网暴露。 */
+    private static boolean ftpAllowed(Prefs prefs, InetAddress peer) {
+        String h = peer.getHostAddress();
+        return peer.isLoopbackAddress() || isPrivate(h);
     }
 
     /** HTTPS 证书要覆盖的地址：所有非蜂窝网卡上的 IPv4 与非临时 IPv6（证书根带名称约束，公网地址会被忽略） */
@@ -336,9 +346,33 @@ public class ShareService extends Service {
                 };
                 HttpServer s = new HttpServer(cfg, prefs.port(), ssl, ShareService::log);
                 s.start();
+                io.github.jiemo9527.httpshare.server.FtpServer f = null;
+                String fErr = null;
+                if (prefs.ftp()) {
+                    try {
+                        f = new io.github.jiemo9527.httpshare.server.FtpServer(s,
+                                io.github.jiemo9527.httpshare.server.FtpServer.PORT, peer -> ftpAllowed(prefs, peer));
+                        f.start();
+                    } catch (Exception e) {
+                        f = null;
+                        fErr = "FTP 启动失败：" + e.getMessage();
+                    }
+                }
+                final io.github.jiemo9527.httpshare.server.FtpServer fs = f;
+                final String ftpErr = fErr;
                 main.post(() -> {
                     server = s;
                     current = s;
+                    ftp = fs;
+                    ftpPort = fs != null ? fs.port() : 0;
+                    ftpError = ftpErr;
+                    if (ftpErr != null) {
+                        log(ftpErr);
+                    } else if (fs != null) {
+                        log("FTP 已启动 端口 " + fs.port() + "（被动端口 "
+                                + io.github.jiemo9527.httpshare.server.FtpServer.PASV_FROM + "-"
+                                + io.github.jiemo9527.httpshare.server.FtpServer.PASV_TO + "，明文，仅限局域网）");
+                    }
                     showme = s.showme();
                     running = true;
                     error = null;
@@ -454,6 +488,12 @@ public class ShareService extends Service {
         }
         Remote.state = "";
         Remote.url = null;
+        if (ftp != null) {
+            ftp.stop();
+            ftp = null;
+        }
+        ftpPort = 0;
+        ftpError = null;
         if (server != null) {
             showme = null;
             current = null;

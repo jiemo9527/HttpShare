@@ -131,6 +131,58 @@ class StaticTest(unittest.TestCase):
         self.assertIn("SameSite=Strict", src)
         self.assertIn("Content-Security-Policy: sandbox", src)
 
+    def test_ftp_closes_all_state_and_rechecks_rename_permission(self):
+        """Stopping FTP must release transfer resources; RNTO is a separate mutation."""
+        ftp = read(JAVA / "server/FtpServer.java")
+        self.assertIn("private final Set<Session> sessions", ftp)
+        self.assertIn("private final Set<ServerSocket> pasvListeners", ftp)
+        self.assertIn("private final Set<Socket> dataSockets", ftp)
+        self.assertIn("s.shutdownInput()", ftp)
+        self.assertIn("s.shutdownOutput()", ftp)
+        self.assertIn("for (Session s : sessions)", ftp)
+        rnto = ftp[ftp.index('case "RNTO":'):ftp.index('case "STAT":')]
+        self.assertIn("!c.allowModify()", rnto)
+        self.assertIn("from.fs.stat(from.abs) == null", rnto)
+
+    def test_ftp_is_plaintext_lan_only_and_has_no_certificate_dependency(self):
+        ftp = read(JAVA / "server/FtpServer.java")
+        service = read(JAVA / "ShareService.java")
+        main = read(JAVA / "MainActivity.java")
+        self.assertIn('"AUTH"', ftp)
+        self.assertIn('不支持 TLS', ftp)
+        self.assertNotIn("SSLContext", ftp)
+        self.assertNotIn("SSLSocket", ftp)
+        self.assertNotIn("protP", ftp)
+        ftp_start = service[service.index("if (prefs.ftp())"):service.index("final io.github.jiemo9527.httpshare.server.FtpServer fs")]
+        self.assertNotIn("Tls.context", ftp_start)
+        # FTP stays LAN-only and CF only forwards the independent HTTP service.
+        allowed = service[service.index("private static boolean ftpAllowed"):service.index("private static List<String> allAddresses")]
+        self.assertNotIn("Remote.publicV4 != null", allowed)
+        self.assertIn("不支持 CF 隧道", main)
+        self.assertIn("密码和文件内容均未加密", main)
+
+    def test_ftp_mode_has_plain_ftp_labels_and_is_mutually_exclusive_with_dav(self):
+        prefs = read(JAVA / "Prefs.java")
+        main = read(JAVA / "MainActivity.java")
+        service = read(JAVA / "ShareService.java")
+        self.assertIn('FILE_FTP = "ftp"', prefs)
+        self.assertIn('String[] fsName = {"关闭", "WebDAV", "FTP"}', main)
+        self.assertNotIn("FTPS", main + prefs + service)
+        self.assertIn("prefs.ftp()", service)
+
+    def test_dav_mount_guidance_uses_machine_certificate_store(self):
+        bat = read(MAIN / "assets/mount.bat")
+        web = read(MAIN / "assets/web.html")
+        self.assertIn("certlm.msc", bat)
+        self.assertNotIn("certmgr.msc", bat)
+        self.assertNotIn("关闭 HTTPS（局域网用 HTTP）", web)
+
+    def test_ftps_mode_hides_dav_mount_script_before_login(self):
+        srv = read(JAVA / "server/HttpServer.java")
+        marker = 'if (path.equals("/api/mount.bat") && !config.webdav())'
+        self.assertIn(marker, srv)
+        self.assertLess(srv.index(marker), srv.index("if (!authed(r))"))
+
 
 if __name__ == "__main__":
     unittest.main()

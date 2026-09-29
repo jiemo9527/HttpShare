@@ -86,7 +86,7 @@ if ($r[0] -eq 0 -and $r[1] -match 'TrustFailure|SecureChannelFailure' -and $CaTh
     if (-not (Test-Path ('Cert:\LocalMachine\Root\' + $CaThumb))) {
         Fail '未能安装根证书（可能在管理员确认时点了“否”）。请重新运行并点“是”，或在 App 设置里关闭 HTTPS。'
     }
-    Say ('已信任根证书 ' + $ca.Subject + '。以后删除：运行 certmgr.msc →“受信任的根证书颁发机构”里删掉它。') 'Green'
+    Say ('已信任根证书 ' + $ca.Subject + '。以后删除：运行 certlm.msc →“受信任的根证书颁发机构”里删掉它。') 'Green'
     & "$Sys\net.exe" stop WebClient 2>&1 | Out-Null
     & "$Sys\net.exe" start WebClient 2>&1 | Out-Null
     $r = Probe ''
