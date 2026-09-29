@@ -941,9 +941,11 @@ public class MainActivity extends Activity {
         TextView showFp = button("查看证书指纹", ACCENT, false);
         showFp.setOnClickListener(v -> new Thread(() -> {
             String f = Tls.fingerprint(getFilesDir());
-            runOnUiThread(() -> fp.setText("SHA-256\n" + f));
+            runOnUiThread(() -> fp.setText(f));
         }).start());
-        hint(page, "防止同一 Wi-Fi 下被窃听密码和文件。浏览器会提示证书不受信任，核对指纹一致后继续访问即可。修改后需重启服务。");
+        hint(page, "防止同一 Wi-Fi 下被窃听密码和文件。证书由本机生成的「本地根证书」签发，只能用于内网 IP，无法冒充任何公网网站。"
+                + "浏览器首次会提示不受信任：核对指纹后继续，或在电脑上安装根证书（网页地址后加 /ca.cer 下载；"
+                + "Windows 一键挂载脚本会自动核对并安装）。修改后需重启服务。");
         page.addView(showFp, wrapLp());
         page.addView(fp);
 

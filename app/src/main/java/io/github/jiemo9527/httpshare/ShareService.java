@@ -182,6 +182,49 @@ public class ShareService extends Service {
         }
     }
 
+    /** HTTPS 证书要覆盖的地址：所有非蜂窝网卡上的 IPv4 与非临时 IPv6（证书根带名称约束，公网地址会被忽略） */
+    private static List<String> allAddresses() {
+        List<String> out = new ArrayList<>(addresses());
+        try {
+            for (NetworkInterface ni : Collections.list(NetworkInterface.getNetworkInterfaces())) {
+                String n = ni.getName();
+                if (!ni.isUp() || ni.isLoopback() || n.startsWith("rmnet") || n.startsWith("ccmni") || n.startsWith("dummy")) {
+                    continue;
+                }
+                for (InetAddress a : Collections.list(ni.getInetAddresses())) {
+                    if (a instanceof java.net.Inet6Address && (a.isLinkLocalAddress() || a.isSiteLocalAddress()
+                            || (a.getAddress()[0] & 0xFE) == 0xFC)) {
+                        out.add(a.getHostAddress());
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        List<String> priv = new ArrayList<>();
+        for (String h : out) {
+            if (isPrivate(h)) {
+                priv.add(h);
+            }
+        }
+        return priv;
+    }
+
+    /** 与根证书的名称约束一致，只把内网地址放进证书 */
+    private static boolean isPrivate(String h) {
+        try {
+            byte[] b = InetAddress.getByName(h.contains("%") ? h.substring(0, h.indexOf('%')) : h).getAddress();
+            if (b.length == 4) {
+                int a0 = b[0] & 0xFF;
+                int a1 = b[1] & 0xFF;
+                return a0 == 10 || (a0 == 172 && a1 >= 16 && a1 < 32) || (a0 == 192 && a1 == 168)
+                        || (a0 == 100 && a1 >= 64 && a1 < 128) || a0 == 127 || (a0 == 169 && a1 == 254);
+            }
+            return (b[0] & 0xFE) == 0xFC || ((b[0] & 0xFF) == 0xFE && (b[1] & 0xC0) == 0x80);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
     /** 局域网 IPv4 地址（排除回环与蜂窝常见接口优先 wlan/ap） */
     public static List<String> addresses() {
         List<String> wlan = new ArrayList<>();
@@ -228,7 +271,7 @@ public class ShareService extends Service {
         final byte[] mountBat = readAsset("mount.bat");
         new Thread(() -> {
             try {
-                SSLContext ssl = prefs.https() ? Tls.context(getFilesDir()) : null;
+                SSLContext ssl = prefs.https() ? Tls.context(getFilesDir(), allAddresses()) : null;
                 HttpServer.Config cfg = new HttpServer.Config() {
                     @Override
                     public List<HttpServer.Share> shares() {
@@ -277,6 +320,18 @@ public class ShareService extends Service {
                     @Override
                     public byte[] mountBat() {
                         return mountBat;
+                    }
+
+                    @Override
+                    public byte[] caCert() {
+                        if (!prefs.https()) {
+                            return null;
+                        }
+                        try {
+                            return Tls.caCertificate(getFilesDir()).getEncoded();
+                        } catch (Exception e) {
+                            return null;
+                        }
                     }
                 };
                 HttpServer s = new HttpServer(cfg, prefs.port(), ssl, ShareService::log);

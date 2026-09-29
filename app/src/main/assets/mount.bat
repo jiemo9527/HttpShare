@@ -16,6 +16,7 @@ $Unc = '{UNC}'
 $NeedBasic = {NEED_BASIC}
 $Persist = '{PERSIST}'
 $Note = '{NOTE}'
+$CaThumb = '{CA_THUMB}'
 $Sys = Join-Path $env:SystemRoot 'System32'
 $KeyPs = 'HKLM:\SYSTEM\CurrentControlSet\Services\WebClient\Parameters'
 $KeyReg = 'HKLM\SYSTEM\CurrentControlSet\Services\WebClient\Parameters'
@@ -57,10 +58,43 @@ function Probe([string]$auth) {
 
 # 1. 先确认能连上手机、证书可用（不带密码，不计入错误次数）
 $r = Probe ''
+if ($r[0] -eq 0 -and $r[1] -match 'TrustFailure|SecureChannelFailure' -and $CaThumb) {
+    # 局域网 HTTPS：安装 App 的本地根证书。该根证书带名称约束，只能为内网 IP 签发，不能冒充公网网站。
+    Say '首次连接 HTTPS：需要让 Windows 信任 App 的本地根证书（只对内网 IP 有效）……' 'Yellow'
+    $caUrl = ([Uri]$DavUrl).GetLeftPart('Authority') + '/ca.cer'
+    $old = [Net.ServicePointManager]::ServerCertificateValidationCallback
+    # 只为下载这一个文件临时跳过校验；下载后用脚本内置的指纹核对，防止被中间人替换
+    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+    try {
+        $der = (New-Object Net.WebClient).DownloadData($caUrl)
+    } catch {
+        Fail ('下载根证书失败：' + $_.Exception.Message)
+    } finally {
+        [Net.ServicePointManager]::ServerCertificateValidationCallback = $old
+    }
+    $ca = New-Object Security.Cryptography.X509Certificates.X509Certificate2(,$der)
+    if ($ca.Thumbprint -ne $CaThumb) {
+        Fail ('根证书指纹不一致（期望 ' + $CaThumb + '，实际 ' + $ca.Thumbprint + '），可能被中间人篡改，已停止。请在网页上重新下载本脚本。')
+    }
+    $caFile = Join-Path $env:TEMP 'HttpShare-CA.cer'
+    [IO.File]::WriteAllBytes($caFile, $der)
+    # WebClient 服务以系统身份校验证书，必须装到“本地计算机\受信任的根证书颁发机构”，需要管理员确认一次
+    try {
+        Start-Process "$Sys\certutil.exe" -ArgumentList '-addstore', '-f', 'Root', "`"$caFile`"" -Verb RunAs -Wait -WindowStyle Hidden
+    } catch { }
+    Remove-Item $caFile -ErrorAction SilentlyContinue
+    if (-not (Test-Path ('Cert:\LocalMachine\Root\' + $CaThumb))) {
+        Fail '未能安装根证书（可能在管理员确认时点了“否”）。请重新运行并点“是”，或在 App 设置里关闭 HTTPS。'
+    }
+    Say ('已信任根证书 ' + $ca.Subject + '。以后删除：运行 certmgr.msc →“受信任的根证书颁发机构”里删掉它。') 'Green'
+    & "$Sys\net.exe" stop WebClient 2>&1 | Out-Null
+    & "$Sys\net.exe" start WebClient 2>&1 | Out-Null
+    $r = Probe ''
+}
 if ($r[0] -eq 0) {
     if ($r[1] -match 'TrustFailure|SecureChannelFailure') {
-        Fail ('Windows 不信任 App 的自签名 HTTPS 证书，系统自带的网络盘无法挂载。' +
-              '请在 App「设置」里关闭 HTTPS（局域网内用 HTTP），或在首页切换为「CF 隧道」，然后在网页上重新下载本脚本。')
+        Fail ('Windows 不信任该地址的 HTTPS 证书，无法挂载。请在网页上重新下载本脚本（会自动安装 App 的根证书），' +
+              '或在 App「设置」里关闭 HTTPS。')
     }
     Fail ('连不上手机（' + $r[2] + '）。请确认手机上的服务正在运行、电脑和手机在同一网络；外网隧道地址每次启动都会变，需重新下载脚本。')
 }

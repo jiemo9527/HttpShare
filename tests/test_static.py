@@ -88,10 +88,22 @@ class StaticTest(unittest.TestCase):
         for ph in ("{URL}", "{NEED_BASIC}", "{UNC}", "{PERSIST}", "{NOTE}"):
             self.assertIn(ph, bat)
         self.assertIn("Read-Host", bat)              # password typed at runtime, never embedded
-        self.assertIn("TrustFailure", bat)           # self-signed HTTPS explained, not a wrong password
+        self.assertIn("TrustFailure", bat)           # untrusted HTTPS explained, not a wrong password
+        # LAN HTTPS: CA is installed only after its thumbprint matches the one baked into the script
+        self.assertIn("{CA_THUMB}", bat)
+        self.assertIn("$ca.Thumbprint -ne $CaThumb", bat)
         self.assertIn("-Verb RunAs", bat)
         # repeated wrong password from auto-retrying clients counts once
         self.assertIn("f[2] == digest", srv)
+
+    def test_tls_name_constrained_ca(self):
+        tls = read(JAVA / "server/Tls.java")
+        # CA must carry critical Name Constraints limited to private ranges
+        self.assertIn("ext(new int[]{2, 5, 29, 30}, true, nameConstraints())", tls)
+        self.assertIn("{192, 168, 0, 0, 16}", tls)
+        self.assertIn("ext(new int[]{2, 5, 29, 17}, true", tls)   # SAN critical, empty subject
+        svc = read(JAVA / "ShareService.java")
+        self.assertIn("Tls.context(getFilesDir(), allAddresses())", svc)
 
     def test_log_persisted(self):
         svc = read(JAVA / "ShareService.java")

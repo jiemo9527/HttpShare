@@ -79,6 +79,9 @@ public final class HttpServer {
 
         /** Windows 挂载脚本模板（assets/mount.bat） */
         byte[] mountBat();
+
+        /** HTTPS 本地根证书（DER）；未开启 HTTPS 时为 null */
+        byte[] caCert();
     }
 
     public static final class Share {
@@ -420,6 +423,16 @@ public final class HttpServer {
             }
             return sendJson(out, 200, new JSONObject().put("ok", true),
                     "hs_sid=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
+        }
+
+        if (path.equals("/ca.cer") && (m.equals("GET") || m.equals("HEAD"))) {
+            // 根证书是公开信息（任何连接都能在 TLS 握手中拿到证书链），不需要登录
+            byte[] ca = config.caCert();
+            if (ca == null) {
+                throw new HttpError(404, "未开启 HTTPS");
+            }
+            return send(out, 200, "application/pkix-cert", ca, m.equals("HEAD"), null,
+                    "Content-Disposition: attachment; filename=\"HttpShare-CA.cer\"\r\n");
         }
 
         boolean isApi = path.startsWith("/api/");
@@ -1130,7 +1143,19 @@ public final class HttpServer {
         } else {
             note = "提示：已设为开机自动重连（重连时 Windows 可能再次询问密码）；手机 IP 或端口变化后请重新下载运行脚本。";
         }
+        // 局域网 HTTPS（App 自己的证书）：脚本里内置根证书指纹，挂载前下载并核对后加入信任
+        String caThumb = "";
+        if (!tunnel && !http) {
+            byte[] ca = config.caCert();
+            if (ca != null) {
+                java.security.cert.X509Certificate c = (java.security.cert.X509Certificate)
+                        java.security.cert.CertificateFactory.getInstance("X.509")
+                                .generateCertificate(new java.io.ByteArrayInputStream(ca));
+                caThumb = Tls.thumbprint(c);
+            }
+        }
         String bat = new String(config.mountBat(), StandardCharsets.UTF_8)
+                .replace("{CA_THUMB}", caThumb)
                 .replace("{URL}", url)
                 .replace("{NEED_BASIC}", http ? "$true" : "$false")
                 .replace("{UNC}", unc)
